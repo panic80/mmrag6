@@ -1,0 +1,37 @@
+version: '3.8'
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+  app:
+    build:
+      context: .
+      # Use the Dockerfile in project root (case-sensitive)
+      dockerfile: Dockerfile
+    # If your app listens on 5000, map it here:
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    depends_on:
+      - qdrant
+    # Pass through your secrets via env‑vars:
+    environment:
+      QDRANT_URL: ${QDRANT_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      SLASH_TOKEN:       ${SLASH_TOKEN}
+    command: python3 server.py
+    # … any other vars your code reads …
+    volumes:
+      # Maps the host's ./storage_llamaindex_db to /app/storage_llamaindex_db in the container
+      - ./storage_llamaindex_db:/app/storage_llamaindex_db
+      # Example: If your local data for ingestion is in ./data on the host, uncomment and adjust:
+      # - ./data:/app/data 
+    restart: always
+
+volumes:
+  qdrant_data:

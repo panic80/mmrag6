@@ -1,0 +1,28 @@
+# Core dependencies
+click>=8.0
+qdrant-client>=1.7.0 # LlamaIndex Qdrant integration might prefer a recent version
+openai>=1.0 # LlamaIndex prefers openai v1+
+requests>=2.0
+python-dotenv>=0.19
+numpy # Added
+
+# LlamaIndex Core
+llama-index==0.12.35
+
+# LlamaIndex Integrations
+llama-index-llms-openai==0.3.38
+llama-index-embeddings-openai==0.3.1
+llama-index-vector-stores-qdrant==0.6.0
+llama-index-readers-web==0.4.1 # For web scraping if needed beyond basic unstructured
+trafilatura # For TrafilaturaWebReader
+# llama-index-packs-node-parser==0.1.2 # For more advanced chunking strategies if needed - REMOVED DUE TO CONFLICT
+llama-index-postprocessor-cohere-rerank==0.4.0 # Optional, for contextual compression via Cohere
+llama-index-postprocessor-sbert-rerank==0.3.0 # For cross-encoder reranking
+llama-index-question-gen-openai==0.3.0 # For query expansion
+llama-index-retrievers-bm25 # For BM25 sparse retriever
+# Custom HybridRetriever implementation is used instead of an external package
+
+# Runtime & Potentially Development/Testing related
+flask
+sentence-transformers # Still needed for sbert-rerank and potentially custom cross-encoders
+rank-bm25 # can likely be removed if LlamaIndex hybrid search is used effectively
