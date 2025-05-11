@@ -7,6 +7,7 @@ from pathlib import Path # Added import
 import openai # Added for OpenAI API
 import shlex # Already present, but good to note
 import sys # Added for print to stderr
+import datetime # Added for timestamps in Mattermost messages
 
 # LlamaIndex imports for /ask
 from llama_index.core import (
@@ -101,19 +102,24 @@ def handle_slash():
                 rest_usable: dict[str, bool] = {"ok": bool(mattermost_url and mattermost_token and channel_id)}
                 answer_text = "An error occurred while processing your query." # Default error message
 
-                def _post_message(txt: str):
-                    """Post *txt* to the originating channel.
-                    (Reuses existing _post_message logic)
-                    """
-                    # Ensure app.logger is available if used within this function outside of request context
-                    # For simplicity, assuming direct calls or already configured logger
+                def _post_message(txt: str, attachments: list = None):
+                    """Post *txt* to the originating channel, optionally with attachments."""
+                    # nonlocal rest_usable # rest_usable is in the scope of run_and_post
+
+                    post_data = {
+                        "channel_id": channel_id,
+                        "message": txt
+                    }
+                    if attachments:
+                        post_data["props"] = {"attachments": attachments}
+
                     if rest_usable["ok"]:
                         try:
                             hdrs = {"Authorization": f"Bearer {mattermost_token}"}
                             resp = requests.post(
                                 f"{mattermost_url}/api/v4/posts",
                                 headers=hdrs,
-                                json={"channel_id": channel_id, "message": txt},
+                                json=post_data, # Use the constructed post_data
                                 timeout=10,
                             )
                             if resp.status_code in (200, 201):
@@ -129,10 +135,13 @@ def handle_slash():
                             app.logger.exception("REST API post failed – falling back to response_url")
 
                     if response_url:
+                        response_payload = {"response_type": "in_channel", "text": txt}
+                        if attachments: # Mattermost supports attachments in the initial response_url post
+                            response_payload["props"] = {"attachments": attachments}
                         try:
                             requests.post(
                                 response_url,
-                                json={"response_type": "in_channel", "text": txt},
+                                json=response_payload,
                                 timeout=10,
                             )
                             return
@@ -142,7 +151,13 @@ def handle_slash():
                 try:
                     openai_api_key = os.environ.get("OPENAI_API_KEY")
                     if not openai_api_key:
-                        _post_message("Error: OPENAI_API_KEY environment variable not set.")
+                        error_attachment = {
+                            "color": "#DC3545", # Red for error
+                            "title": "Query Processing Error",
+                            "text": "OPENAI_API_KEY environment variable not set.",
+                            "fields": [{"short": False, "title": "Suggestion", "value": "Please contact an administrator to configure the OpenAI API key."}]
+                        }
+                        _post_message(txt="⚠️ Configuration Error", attachments=[error_attachment])
                         return
 
                     client = openai.OpenAI(api_key=openai_api_key) # This client init seems redundant if only LlamaIndex is used now.
@@ -152,15 +167,19 @@ def handle_slash():
 
                     # query_text is now query_text_param
                     if not query_text_param:
-                        _post_message("Error: No query text provided.")
+                        error_attachment = {
+                            "color": "#DC3545", # Red for error
+                            "title": "Query Processing Error",
+                            "text": "No query text provided.",
+                            "fields": [{"short": False, "title": "Usage", "value": "Please provide a query after the `/ask` command."}]
+                        }
+                        _post_message(txt="⚠️ Invalid Usage", attachments=[error_attachment])
                         return
 
                     # openai_api_key is already fetched and checked once.
                     # This second check is redundant if the first one passes.
                     # openai_api_key = os.environ.get("OPENAI_API_KEY") 
-                    if not openai_api_key:
-                        _post_message("Error: OPENAI_API_KEY environment variable not set.")
-                        return
+                    # Redundant check removed, initial check with attachment is sufficient.
 
                     # Configure LlamaIndex Settings
                     # Ensure these model names match what ingest_llamaindex.py uses or expects
@@ -173,7 +192,13 @@ def handle_slash():
                         Settings.embed_model = LlamaOpenAIEmbedding(model=embedding_model_name, api_key=openai_api_key)
                     except Exception as e_settings:
                         app.logger.error(f"Failed to initialize LlamaIndex OpenAI models: {e_settings}")
-                        _post_message(f"Error initializing LlamaIndex models: {e_settings}")
+                        error_attachment = {
+                            "color": "#DC3545",
+                            "title": "Query Initialization Error",
+                            "text": f"Failed to initialize LlamaIndex models: {e_settings}",
+                            "fields": [{"short": False, "title": "Suggestion", "value": "Check server logs for details."}]
+                        }
+                        _post_message(txt="⚠️ Initialization Error", attachments=[error_attachment])
                         return
 
                     # Determine collection name (already passed as collection_name_param)
@@ -194,7 +219,16 @@ def handle_slash():
                         app.logger.info(f"Successfully connected to Qdrant collection '{collection_name_param}'.")
                     except Exception as e_qdrant_check:
                         app.logger.error(f"Failed to connect to or find Qdrant collection '{collection_name_param}': {e_qdrant_check}")
-                        _post_message(f"Error: Qdrant collection '{collection_name_param}' not found or Qdrant is inaccessible. Please ensure ingestion was successful. Details: {e_qdrant_check}")
+                        error_attachment = {
+                            "color": "#DC3545",
+                            "title": "Data Store Error",
+                            "text": f"Qdrant collection '{collection_name_param}' not found or Qdrant is inaccessible.",
+                            "fields": [
+                                {"short": False, "title": "Suggestion", "value": f"Ensure ingestion for collection '{collection_name_param}' was successful. Check Qdrant server status."},
+                                {"short": False, "title": "Details", "value": str(e_qdrant_check)}
+                            ]
+                        }
+                        _post_message(txt="⚠️ Data Access Error", attachments=[error_attachment])
                         return
 
                     vector_store = QdrantVectorStore(
@@ -386,23 +420,58 @@ def handle_slash():
                     app.logger.error(f"An error occurred calling query_llamaindex.main_async: {e}")
                     import traceback
                     app.logger.error(traceback.format_exc())
-                    answer_text = f"An error occurred while processing your query with LlamaIndex. Details: {e}"
+                    # answer_text = f"An error occurred while processing your query with LlamaIndex. Details: {e}" # Replaced by attachment
+                    error_attachment = {
+                        "color": "#DC3545",
+                        "title": "Query Execution Error",
+                        "text": f"An error occurred while processing your query with the LlamaIndex pipeline.",
+                        "fields": [
+                            {"short": False, "title": "Details", "value": str(e)},
+                            {"short": False, "title": "Suggestion", "value": "Check server logs for a full traceback."}
+                        ]
+                    }
+                    _post_message(txt=f"⚠️ Error during query for: {original_query_text_param_for_logging}", attachments=[error_attachment])
+                    return # Exit after posting error
 
-                # Compose final message
-                final_msg = f"**Q:** {original_query_text_param_for_logging}\n\n**A:**\n{answer_text}" # Use original for Q display
-                _post_message(final_msg)
+                # Compose final message with attachments
+                answer_attachment = {
+                    "color": "#28A745", # Green for success
+                    "author_name": "RAG System",
+                    "title": f"Re: {original_query_text_param_for_logging}",
+                    "text": answer_text if answer_text else "No answer could be generated.",
+                    "footer": f"Powered by LlamaIndex & OpenAI ({openai_model_llm_val})", # Use llm_model_name from earlier
+                    "ts": datetime.datetime.now().timestamp()
+                }
+                _post_message(txt=f"**Q:** {original_query_text_param_for_logging}", attachments=[answer_attachment])
+
 
             # Always run asynchronously
             threading.Thread(target=run_and_post, args=(text, final_collection_name_for_ack), daemon=True).start()
-            # Immediate acknowledgement
-            return jsonify({"text": f"Processing your query with LlamaIndex (collection: {final_collection_name_for_ack})..."}), 200
+            
+            # Immediate acknowledgement using attachments
+            ack_payload = {
+                # "response_type": "in_channel", # This is for response_url, direct post is always in_channel
+                "text": f"⏳ Processing your query with LlamaIndex (collection: {final_collection_name_for_ack})...",
+                "props": {
+                    "attachments": [{
+                        "color": "#007BFF", # Blue for informational
+                        "text": "Your query is being processed. An answer will appear shortly."
+                    }]
+                }
+            }
+            # For immediate response, we can use jsonify with props for attachments if Mattermost supports it directly
+            # in the slash command immediate response. Otherwise, a simple text ack is safer.
+            # Let's stick to the simpler text ack for the immediate response to avoid potential issues,
+            # as the main answer will have rich formatting.
+            return jsonify({"response_type": "in_channel", "text": f"⏳ Processing your query with LlamaIndex (collection: {final_collection_name_for_ack}). Your answer will appear shortly."}), 200
+
 
         # 'inject' ingests the current channel into the RAG collection
         elif cmd_name in ("inject", "injest"):
             import shlex
             def run_inject():
                 """Handle the /inject (or /injest) command in a background thread.
-                Sends real-time, concise updates to the Mattermost channel.
+                Sends real-time, concise updates to the Mattermost channel with threading and attachments.
                 """
                 import requests
                 import os
@@ -418,11 +487,27 @@ def handle_slash():
                 # app.logger is also available.
 
                 rest_usable: dict[str, bool] = {"ok": bool(mattermost_url and mattermost_token and channel_id)}
+                current_thread_root_id: str | None = None # For threading replies
 
-                def _send_message_to_mattermost(message_text: str):
-                    """Sends a message immediately to the Mattermost channel."""
-                    if not message_text: # Avoid sending empty messages
+                def _send_message_to_mattermost(message_text: str, attachments: list = None, is_first_message: bool = False):
+                    """Sends a message immediately to the Mattermost channel.
+                    Can post as a new message or a reply, and can include attachments.
+                    Updates current_thread_root_id if it's the first message and successful.
+                    """
+                    nonlocal rest_usable, current_thread_root_id
+
+                    if not message_text and not attachments:
                         return
+
+                    post_data = {
+                        "channel_id": channel_id,
+                        "message": message_text
+                    }
+                    if attachments:
+                        post_data["props"] = {"attachments": attachments}
+                    
+                    if not is_first_message and current_thread_root_id:
+                        post_data["root_id"] = current_thread_root_id
 
                     if rest_usable["ok"]:
                         try:
@@ -430,12 +515,18 @@ def handle_slash():
                             resp = requests.post(
                                 f"{mattermost_url}/api/v4/posts",
                                 headers=hdrs,
-                                json={"channel_id": channel_id, "message": message_text},
+                                json=post_data,
                                 timeout=10,
                             )
                             if resp.status_code in (200, 201):
+                                if is_first_message and not current_thread_root_id: # Store root_id only once
+                                    try:
+                                        current_thread_root_id = resp.json().get("id")
+                                        app.logger.info(f"Captured root_id for inject thread: {current_thread_root_id}")
+                                    except Exception as e_json:
+                                        app.logger.error(f"Could not parse post ID from response for threading: {e_json}")
                                 return
-                            if resp.status_code in (401, 403): # Token issue
+                            if resp.status_code in (401, 403):
                                 rest_usable["ok"] = False
                                 app.logger.warning("Mattermost REST API auth failed (401/403). Falling back to response_url for subsequent messages.")
                             else:
@@ -448,12 +539,22 @@ def handle_slash():
                             app.logger.exception(f"Mattermost REST API request failed: {e_req}. Falling back to response_url.")
                     
                     if response_url:
+                        # Fallback for response_url: threading and complex follow-up attachments are less reliable.
+                        # Send as new message if REST failed.
+                        fallback_payload = {"response_type": "in_channel", "text": message_text}
+                        if is_first_message and attachments: # Try to send attachments for the very first message
+                            fallback_payload["props"] = {"attachments": attachments}
+                        
+                        # If it's a follow-up and REST failed, we can't reliably thread.
+                        # Prepend to indicate it's an update.
+                        if not is_first_message and not rest_usable["ok"] and current_thread_root_id:
+                             # Indicate it's part of an ongoing operation if threading failed
+                            fallback_payload["text"] = f"(Update for /inject) {message_text}"
+
                         try:
-                            requests.post(
-                                response_url,
-                                json={"response_type": "in_channel", "text": message_text},
-                                timeout=10,
-                            )
+                            requests.post(response_url, json=fallback_payload, timeout=10)
+                            if is_first_message: # If REST failed for the first message, response_url was used.
+                                app.logger.warning("First inject message sent via response_url; threading may not be available for follow-ups if REST remains down.")
                             return
                         except requests.exceptions.RequestException as e_resp_url:
                             app.logger.exception(f"Failed to post to response_url: {e_resp_url}")
@@ -462,10 +563,24 @@ def handle_slash():
 
                 # Main ingestion logic
                 try:
+                    _send_message_to_mattermost(
+                        message_text="⚙️ **`/inject` command received.** Processing...",
+                        attachments=[{
+                            "color": "#007BFF", # Blue for informational
+                            "fields": [{"short": True, "title": "Status", "value": "Initializing"}]
+                        }],
+                        is_first_message=True
+                    )
                     raw_args_from_text = shlex.split(text or "")
                     
                     collection_name = os.environ.get("QDRANT_COLLECTION_NAME", "rag_llamaindex_data")
                     temp_collection_args = []
+                    # Helper for sending attachment-based messages for arg parsing errors
+                    def _send_arg_error(title, text_detail):
+                        _send_message_to_mattermost(
+                            message_text="⚠️ Argument Error",
+                            attachments=[{"color": "#FFC107", "title": title, "text": text_detail}]
+                        )
 
                     if "--collection-name" in raw_args_from_text:
                         try:
@@ -473,52 +588,73 @@ def handle_slash():
                             collection_name = raw_args_from_text[idx + 1]
                             temp_collection_args.extend([raw_args_from_text[idx], raw_args_from_text[idx+1]])
                         except (ValueError, IndexError):
-                            _send_message_to_mattermost("⚠️ Invalid --collection-name usage. Using default or environment variable.")
+                            _send_arg_error("Invalid Collection Name Usage", "Invalid --collection-name usage. Using default or environment variable.")
                     elif "-c" in raw_args_from_text:
                         try:
                             idx = raw_args_from_text.index("-c")
                             collection_name = raw_args_from_text[idx + 1]
                             temp_collection_args.extend([raw_args_from_text[idx], raw_args_from_text[idx+1]])
                         except (ValueError, IndexError):
-                            _send_message_to_mattermost("⚠️ Invalid -c usage for collection name. Using default or environment variable.")
+                             _send_arg_error("Invalid Collection Name Usage", "Invalid -c usage for collection name. Using default or environment variable.")
                     
                     is_purge_command = "--purge" in raw_args_from_text
                     
                     if is_purge_command:
-                        _send_message_to_mattermost(f"ℹ️ Purge command received for collection '{collection_name}'.")
-                        qdrant_url_env = os.environ.get("QDRANT_URL", "http://qdrant:6333") # Match Docker Compose
+                        _send_message_to_mattermost(
+                            message_text=f"ℹ️ Purge command for '{collection_name}'",
+                            attachments=[{
+                                "color": "#007BFF", "title": "Purge Operation Started",
+                                "text": f"Attempting to delete and recreate collection: `{collection_name}`."
+                            }]
+                        )
+                        qdrant_url_env = os.environ.get("QDRANT_URL", "http://qdrant:6333")
                         qdrant_api_key_env = os.environ.get("QDRANT_API_KEY")
                         
                         try:
                             q_client = QdrantClient(url=qdrant_url_env, api_key=qdrant_api_key_env)
                             q_client.delete_collection(collection_name=collection_name)
-                            _send_message_to_mattermost(f"✅ Successfully deleted collection '{collection_name}'.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#28A745", "title": "Collection Deleted",
+                                "text": f"Successfully deleted collection `{collection_name}`."
+                            }])
                         except Exception as e_del:
                             app.logger.error(f"Failed to delete Qdrant collection '{collection_name}': {e_del}\n{traceback.format_exc()}")
-                            _send_message_to_mattermost(f"⚠️ Could not delete collection '{collection_name}'. It might not exist or an error occurred. Check server logs.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#DC3545", "title": "Deletion Failed",
+                                "text": f"Could not delete collection `{collection_name}`. It might not exist or an error occurred. Details: {e_del}",
+                                "fields": [{"short": False, "title": "Action", "value": "Check server logs."}]
+                            }])
                         
-                        try: # Recreate collection
+                        try:
                             from qdrant_client.http import models as qdrant_models
                             vector_size = int(os.environ.get("DEFAULT_VECTOR_SIZE", 3072))
-                            # Ensure q_client is initialized if previous block failed partially
-                            if 'q_client' not in locals():
+                            if 'q_client' not in locals(): # Ensure client is initialized
                                 q_client = QdrantClient(url=qdrant_url_env, api_key=qdrant_api_key_env)
-
                             q_client.recreate_collection(
                                 collection_name=collection_name,
                                 vectors_config=qdrant_models.VectorParams(size=vector_size, distance=qdrant_models.Distance.COSINE)
                             )
-                            _send_message_to_mattermost(f"✅ Successfully recreated empty collection '{collection_name}' (vector size: {vector_size}).")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#28A745", "title": "Collection Recreated",
+                                "text": f"Successfully recreated empty collection `{collection_name}` (vector size: {vector_size})."
+                            }])
                         except Exception as e_recreate:
                             app.logger.error(f"Failed to recreate Qdrant collection '{collection_name}': {e_recreate}\n{traceback.format_exc()}")
-                            _send_message_to_mattermost(f"❌ Failed to recreate collection '{collection_name}'. Check server logs.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#DC3545", "title": "Recreation Failed",
+                                "text": f"Failed to recreate collection `{collection_name}`. Details: {e_recreate}",
+                                "fields": [{"short": False, "title": "Action", "value": "Check server logs."}]
+                            }])
                             return # Stop if recreate fails
 
                         args_for_source_check = [arg for arg in raw_args_from_text if arg != "--purge" and arg not in temp_collection_args]
                         is_purge_only = not any(not arg.startswith("-") for arg in args_for_source_check)
 
                         if is_purge_only:
-                            _send_message_to_mattermost(f"ℹ️ Purge operation for '{collection_name}' complete. No sources specified for further ingestion.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#007BFF", "title": "Purge Complete",
+                                "text": f"Purge operation for `{collection_name}` finished. No sources specified for further ingestion."
+                            }])
                             return
 
                     ingest_cmd_base = [sys.executable, "-u", "-m", "ingest_llamaindex", "--collection-name", collection_name]
@@ -527,12 +663,15 @@ def handle_slash():
                     args_to_filter_for_ingest = [arg for arg in raw_args_from_text if arg != "--purge" and arg not in temp_collection_args]
 
                     for arg in args_to_filter_for_ingest:
-                        if arg == "--rich-metadata": continue
+                        if arg == "--rich-metadata": continue # Default, no need to pass
                         elif arg == "--no-rich-metadata": ingest_passthrough_args.append(arg)
                         elif arg in ("--generate-summaries", "--no-generate-summaries", "--quality-checks", "--no-quality-checks", "--crawl-depth", "--depth-crawl", "--parallel"):
-                            _send_message_to_mattermost(f"ℹ️ Flag '{arg}' is no longer supported and will be ignored.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#FFC107", "title": "Unsupported Flag",
+                                "text": f"Flag `{arg}` is no longer supported and will be ignored."
+                            }])
                         elif not arg.startswith("-"): potential_sources_from_args.append(arg)
-                        else: ingest_passthrough_args.append(arg)
+                        else: ingest_passthrough_args.append(arg) # Pass other flags through
                     
                     ingest_cmd_base.extend(ingest_passthrough_args)
                     final_sources_to_process = []
@@ -540,13 +679,20 @@ def handle_slash():
 
                     if potential_sources_from_args:
                         final_sources_to_process = potential_sources_from_args
-                    else:
-                        if not mattermost_url or not channel_id:
-                            _send_message_to_mattermost("❌ MATTERMOST_URL or channel_id not configured – unable to fetch channel messages for ingestion.")
+                    else: # No explicit sources, try to fetch from current channel
+                        if not mattermost_url or not channel_id or not mattermost_token: # Added mattermost_token check
+                            _send_message_to_mattermost(message_text="❌ Configuration Error", attachments=[{
+                                "color": "#DC3545", "title": "Cannot Fetch Channel History",
+                                "text": "MATTERMOST_URL, MATTERMOST_TOKEN, or channel_id not configured. Unable to fetch channel messages for ingestion."
+                            }])
                             return
-                        _send_message_to_mattermost("ℹ️ No source explicitly provided. Fetching current channel transcript for ingestion...")
+                        
+                        _send_message_to_mattermost(message_text="", attachments=[{
+                            "color": "#007BFF", "title": "Fetching Channel Transcript",
+                            "text": "No source explicitly provided. Attempting to fetch current channel transcript for ingestion..."
+                        }])
                         msgs = []
-                        hdrs = {"Authorization": f"Bearer {mattermost_token}"} if mattermost_token else {}
+                        hdrs = {"Authorization": f"Bearer {mattermost_token}"} # Already checked mattermost_token
                         per_page = 200
                         page = 0
                         channel_fetch_ok = True
@@ -559,7 +705,10 @@ def handle_slash():
                                 resp_ct.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
                             except requests.exceptions.RequestException as e_fetch:
                                 app.logger.error(f"Error fetching posts from Mattermost: {e_fetch}\n{traceback.format_exc()}")
-                                _send_message_to_mattermost(f"❌ Error fetching channel history: {e_fetch}. Check server logs.")
+                                _send_message_to_mattermost(message_text="❌ Fetch Error", attachments=[{
+                                    "color": "#DC3545", "title": "Channel History Fetch Failed",
+                                    "text": f"Error fetching channel history: {e_fetch}. Check server logs."
+                                }])
                                 channel_fetch_ok = False
                                 break
                             
@@ -573,31 +722,50 @@ def handle_slash():
                             if len(order) < per_page: break
                             page += 1
                         
-                        if not channel_fetch_ok: return
+                        if not channel_fetch_ok: return # Error message already sent
                         if not msgs:
-                            _send_message_to_mattermost("ℹ️ No messages found in the current channel to ingest.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#007BFF", "title": "No Messages Found",
+                                "text": "No messages found in the current channel to ingest."
+                            }])
                             return
                         
                         try:
                             tmp_file = tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False)
-                            tmp_file.write("\n".join(m.rstrip("\n") for m in msgs))
+                            tmp_file.write("\n".join(m.rstrip("\n") for m in msgs)) # Ensure messages are strings
                             tmp_file.close()
                             final_sources_to_process = [tmp_file.name]
                             temp_files_to_clean.append(tmp_file.name)
-                            _send_message_to_mattermost(f"ℹ️ Fetched {len(msgs)} messages from channel for ingestion.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#28A745", "title": "Channel Transcript Fetched",
+                                "text": f"Fetched {len(msgs)} messages from channel. Prepared for ingestion as `{tmp_file.name}`."
+                            }])
                         except IOError as e_io:
                             app.logger.error(f"Failed to write channel transcript to temp file: {e_io}\n{traceback.format_exc()}")
-                            _send_message_to_mattermost("❌ Error preparing channel transcript for ingestion. Check server logs.")
+                            _send_message_to_mattermost(message_text="❌ File Error", attachments=[{
+                                "color": "#DC3545", "title": "Transcript Preparation Failed",
+                                "text": "Error preparing channel transcript for ingestion. Check server logs."
+                            }])
                             return
 
-
                     if not final_sources_to_process:
-                        _send_message_to_mattermost("ℹ️ No sources to process for ingestion.")
+                        _send_message_to_mattermost(message_text="", attachments=[{
+                            "color": "#007BFF", "title": "No Sources",
+                            "text": "No sources to process for ingestion."
+                        }])
                         return
 
                     all_sources_successful = True
+                    num_sources = len(final_sources_to_process)
                     for src_idx, source_item in enumerate(final_sources_to_process):
-                        _send_message_to_mattermost(f"🚀 Starting ingestion for source ({src_idx+1}/{len(final_sources_to_process)}): `{source_item}`")
+                        _send_message_to_mattermost(
+                            message_text="", 
+                            attachments=[{
+                                "color": "#FFA500", # Orange for in-progress
+                                "title": f"🚀 Processing Source ({src_idx+1}/{num_sources}): `{source_item}`",
+                                "text": "Starting ingestion for this source..."
+                            }]
+                        )
                         
                         current_ingest_cmd_for_source = list(ingest_cmd_base)
                         is_url = source_item.startswith("http://") or source_item.startswith("https://")
@@ -629,15 +797,24 @@ def handle_slash():
                             
                             ret = proc.wait()
                             if ret != 0:
-                                _send_message_to_mattermost(f"❌ Error processing source `{source_item}` (exit code: {ret}). Check server logs for details.")
+                                _send_message_to_mattermost(message_text="", attachments=[{
+                                    "color": "#DC3545", "title": f"❌ Error: Source `{source_item}`",
+                                    "text": f"Processing failed (exit code: {ret}). Check server logs for details."
+                                }])
                                 all_sources_successful = False
                             else:
-                                _send_message_to_mattermost(f"✅ Successfully processed source: `{source_item}`")
+                                _send_message_to_mattermost(message_text="", attachments=[{
+                                    "color": "#28A745", "title": f"✅ Success: Source `{source_item}`",
+                                    "text": "Successfully processed and ingested."
+                                }])
                         except Exception as e_proc:
                             app.logger.error(f"Failed to start/run ingestion subprocess for '{source_item}': {e_proc}\n{traceback.format_exc()}")
-                            _send_message_to_mattermost(f"❌ Critical error during processing of source `{source_item}`. Check server logs.")
+                            _send_message_to_mattermost(message_text="", attachments=[{
+                                "color": "#DC3545", "title": f"❌ Critical Error: Source `{source_item}`",
+                                "text": f"Critical error during processing. Details: {e_proc}. Check server logs."
+                            }])
                             all_sources_successful = False
-                            continue # Try next source if possible
+                            continue 
                     
                     for tf_path in temp_files_to_clean:
                         try:
@@ -646,25 +823,49 @@ def handle_slash():
                         except OSError as e_clean:
                             app.logger.warning(f"Failed to clean up temporary file '{tf_path}': {e_clean}")
                     
-                    if all_sources_successful and final_sources_to_process:
-                        _send_message_to_mattermost("✅ Ingestion process completed successfully for all sources.")
-                    elif final_sources_to_process: # Some sources might have failed
-                        _send_message_to_mattermost("⚠️ Ingestion process finished, but some sources may have encountered errors. Check server logs and previous messages for details.")
-                    # If no sources were processed (e.g. purge only and it returned early), no final message here.
-
-                except Exception as e_outer: # Catch any unexpected errors in the main try block
+                    if final_sources_to_process: # Only send summary if sources were attempted
+                        if all_sources_successful:
+                            _send_message_to_mattermost(
+                                message_text="**`/inject` process finished.**",
+                                attachments=[{
+                                    "color": "#28A745", "title": "🎉 Ingestion Complete",
+                                    "text": f"All {num_sources} specified source(s) were processed successfully into collection `{collection_name}`.",
+                                    "fields": [{"short": True, "title": "Collection", "value": collection_name}]
+                                }]
+                            )
+                        else:
+                            _send_message_to_mattermost(
+                                message_text="**`/inject` process finished.**",
+                                attachments=[{
+                                    "color": "#FFC107", "title": "⚠️ Ingestion Finished with Issues",
+                                    "text": f"Some sources encountered errors during processing for collection `{collection_name}`. Please check previous messages in this thread and server logs for details.",
+                                    "fields": [{"short": True, "title": "Collection", "value": collection_name}]
+                                }]
+                            )
+                except Exception as e_outer:
                     app.logger.error(f"An unexpected error occurred during the inject process: {e_outer}\n{traceback.format_exc()}")
-                    _send_message_to_mattermost("❌ An critical unexpected error occurred during the inject process. Please check server logs for details.")
-                # No 'finally' block needed as messages are sent immediately.
+                    _send_message_to_mattermost(
+                        message_text="❌ Critical Error in `/inject`",
+                        attachments=[{
+                            "color": "#DC3545", "title": "Critical Inject Process Error",
+                            "text": f"An unexpected critical error occurred. Details: {e_outer}. Please check server logs."
+                        }]
+                    )
 
-            # This was the old synchronous purge handling block, now integrated into run_inject
-            # threading.Thread(target=run_inject, daemon=True).start()
-            # return jsonify({"text": "Ingestion with LlamaIndex started... progress will be posted shortly."}), 200
-
-            # Start the run_inject thread
             threading.Thread(target=run_inject, daemon=True).start()
-            # Return immediate acknowledgement
-            return jsonify({"text": "Ingestion command received. Processing... progress will be posted."}), 200
+            # Immediate acknowledgement for /inject
+            return jsonify({
+                "response_type": "in_channel", # This ensures it's visible
+                "text": "🚀 **`/inject` command received.** An initial status message will appear shortly in a new thread (if supported by your Mattermost version and REST API is working).",
+                 # Props for attachments in immediate response might not always work as expected,
+                 # but some versions of MM might pick it up. The first _send_message_to_mattermost will be more reliable.
+                "props": {
+                    "attachments": [{
+                        "color": "#007BFF",
+                        "text": "Ingestion process is starting. Progress will be posted in a thread."
+                    }]
+                }
+            }), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
