@@ -304,10 +304,9 @@ from llama_index.core.schema import NodeWithScore, BaseNode
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI as LlamaOpenAI
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from llama_index.question_gen.openai import OpenAIQuestionGenerator
 # Import evaluation tools conditionally
 try:
-    from llama_index.evaluation import ( # For RAG evaluation
+    from llama_index.core.evaluation import ( # For RAG evaluation
         FaithfulnessEvaluator,
         RelevancyEvaluator,
         CorrectnessEvaluator, 
@@ -340,32 +339,35 @@ _VERBOSE_OUTPUT = False
 # Custom MMR function _mmr_rerank_nodes is now removed in favor of MMRNodePostprocessor.
 
 async def main_async(
-    collection_name: str,
-    similarity_top_k: int,
-    qdrant_url: str,
-    qdrant_api_key: str | None,
-    openai_api_key: str | None,
-    openai_model_embedding: str,
-    openai_model_llm: str,
-    raw_output_flag: bool,
-    use_hybrid_search: bool,
-    sparse_top_k: int,
-    rerank_top_n: int,
-    reranker_model: str,
-    use_mmr: bool,
-    mmr_lambda: float,
-    filters_kv: Sequence[str],
-    use_query_expansion: bool,
-    max_expansions: int,
-    evaluate_rag_flag: bool,
-    compress_context_flag: bool,
-    cohere_api_key: str | None,
-    verbose: bool,
-    query_text: Sequence[str],
+    query_text: Sequence[str], # Moved to front, as it's the primary required argument
+    *, # Make subsequent arguments keyword-only
+    collection_name: str = "rag_llamaindex_data",
+    similarity_top_k: int = 100, # Changed default
+    qdrant_url: str = "http://localhost:6333",
+    qdrant_api_key: str | None = None,
+    openai_api_key: str | None = None,
+    openai_model_embedding: str = "text-embedding-3-large",
+    openai_model_llm: str = "gpt-4.1-mini",
+    llm_temperature: float = 0.0, # Changed from llm_temperature to 0.0 for deterministic output
+    raw_output_flag: bool = False,
+    use_hybrid_search: bool = True,
+    sparse_top_k: int = 100, # Changed default
+    rerank_top_n: int = 0,
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    use_mmr: bool = True,
+    mmr_lambda: float = 0.5,
+    filters_kv: Sequence[str] = (), # Default to empty tuple for sequences
+    evaluate_rag_flag: bool = False,
+    compress_context_flag: bool = False,
+    cohere_api_key: str | None = None,
+    verbose: bool = False
 ):
     """Async logic for querying a LlamaIndex RAG setup."""
     global _VERBOSE_OUTPUT
     _VERBOSE_OUTPUT = verbose
+
+    async_qdrant_client: AsyncQdrantClient | None = None
+    response_value: str = "" # Initialize with a default empty string
 
     # Load .env if present
     env_path = os.path.join(os.getcwd(), ".env")
@@ -381,54 +383,54 @@ async def main_async(
         click.echo("[fatal] OPENAI_API_KEY is not set.", err=True)
         sys.exit(1)
 
-    # 1. Configure LlamaIndex Settings
-    click.echo("[info] Configuring LlamaIndex Settings...")
-    Settings.llm = LlamaOpenAI(model=openai_model_llm, api_key=final_openai_api_key)
-    Settings.embed_model = OpenAIEmbedding(model=openai_model_embedding, api_key=final_openai_api_key)
-    # For SentenceSplitter used in compression fallback or if SemanticSplitter fails
-    Settings.chunk_size = 1024 # Default for SentenceSplitter if used standalone
-    Settings.chunk_overlap = 20
+    try: # Main try block for the function, including client initialization and all operations
+        # 1. Configure LlamaIndex Settings
+        click.echo("[info] Configuring LlamaIndex Settings...")
+        Settings.llm = LlamaOpenAI(
+            model=openai_model_llm, 
+            api_key=final_openai_api_key,
+            temperature=0.0 # Changed from llm_temperature to 0.0 for deterministic output
+        )
+        Settings.embed_model = OpenAIEmbedding(model=openai_model_embedding, api_key=final_openai_api_key)
+        # For SentenceSplitter used in compression fallback or if SemanticSplitter fails
+        Settings.chunk_size = 1024 # Default for SentenceSplitter if used standalone
+        Settings.chunk_overlap = 20
 
-    # 2. Initialize Qdrant Client and VectorStore
-    # Ensure collection_name is set with a consistent default
-    effective_collection_name = collection_name
-    if not effective_collection_name: # Check if collection_name is None or empty
-        effective_collection_name = "llamaindex_default_collection"
-        if _VERBOSE_OUTPUT or collection_name is None: # Print warning if it was defaulted
-             click.echo(f"[warning] --collection-name not provided or empty, using default Qdrant collection name: '{effective_collection_name}'. It's recommended to specify one.", err=True)
-    
-    click.echo(f"[info] Initializing Qdrant vector store for collection: {effective_collection_name}")
+        # 2. Initialize Qdrant Client and VectorStore
+        # Ensure collection_name is set with a consistent default
+        effective_collection_name = collection_name
+        if not effective_collection_name: # Check if collection_name is None or empty
+            effective_collection_name = "llamaindex_default_collection"
+            if _VERBOSE_OUTPUT or collection_name is None: # Print warning if it was defaulted
+                 click.echo(f"[warning] --collection-name not provided or empty, using default Qdrant collection name: '{effective_collection_name}'. It's recommended to specify one.", err=True)
+        
+        click.echo(f"[info] Initializing Qdrant vector store for collection: {effective_collection_name}")
 
-    try:
         if _VERBOSE_OUTPUT:
             click.echo(f"[info] Qdrant URL: {qdrant_url}")
             click.echo(f"[info] Qdrant API Key provided: {'Yes' if final_qdrant_api_key else 'No'}")
 
         qdrant_native_client = QdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
-        async_qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
+        async_qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=final_qdrant_api_key) # Assigned here
         
         # Check if collection exists
         try:
             qdrant_native_client.get_collection(collection_name=effective_collection_name)
             if _VERBOSE_OUTPUT:
                 click.echo(f"[info] Successfully connected to existing Qdrant collection: {effective_collection_name}")
-        except Exception as e:
-            click.echo(f"[fatal] Qdrant collection '{effective_collection_name}' not found or error accessing it: {e}", err=True)
+        except Exception as e_coll_check: # More specific exception handling if possible
+            click.echo(f"[fatal] Qdrant collection '{effective_collection_name}' not found or error accessing it: {e_coll_check}", err=True)
             click.echo(f"Please ensure the collection exists and was created with compatible embeddings (e.g., via ingest_llamaindex.py).")
-            sys.exit(1)
-            
+            # No sys.exit(1) here, let finally block handle client closure if initialized
+            raise # Re-raise the exception to be caught by the outer try-except or to terminate if not caught
+
         vector_store = QdrantVectorStore(
             client=qdrant_native_client, 
             aclient=async_qdrant_client,
             collection_name=effective_collection_name
         )
 
-        # For hybrid search (BM25), we need the docstore from the local filesystem.
-        # The persist_dir for query should match the one used during ingestion for the specific collection.
-        # Default persist_dir for the script. The actual path for a collection is persist_dir / collection_name.
         base_persist_dir = Path("./storage_llamaindex_db") 
-        # Construct the specific path for the collection's docstore etc.
-        # Use effective_collection_name here to match ingestion logic if collection_name was defaulted.
         collection_specific_persist_path = base_persist_dir / effective_collection_name
         
         if _VERBOSE_OUTPUT:
@@ -452,416 +454,250 @@ async def main_async(
             if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs') and storage_context.docstore.docs:
                 click.echo(f"[info] Successfully loaded/initialized Docstore with {len(storage_context.docstore.docs)} documents.")
                 docstore_loaded_successfully = True
-            elif "persist_dir" in storage_context_args: # It attempted to load but docstore is empty
+            elif "persist_dir" in storage_context_args:
                  click.echo(f"[warning] Loaded StorageContext from {storage_context_args['persist_dir']}, but Docstore is empty or has no documents. BM25 may be ineffective.")
-            else: # No persist_dir was provided, so docstore is expected to be empty initially
+            else:
                  click.echo(f"[info] Initialized new empty Docstore. BM25 will be ineffective unless nodes are added from vector store or other source.")
-
         except Exception as e_sc:
             click.echo(f"[warning] Failed to load or initialize StorageContext with persist_dir '{collection_specific_persist_path}': {e_sc}. Falling back to default StorageContext. BM25 will be limited.", err=True)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store) # Fallback
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
         index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
         
-        # If docstore wasn't loaded successfully from disk, try to populate it from the index's nodes
-        # This is a fallback for BM25 if the persisted docstore was problematic
         if not docstore_loaded_successfully and hasattr(index, '_all_nodes_dict') and index._all_nodes_dict:
             click.echo("[info] Docstore was not loaded from disk or was empty. Attempting to populate docstore from index nodes for BM25.")
             for node_id, node in index._all_nodes_dict.items():
                 if not storage_context.docstore.document_exists(node_id):
-                    storage_context.docstore.add_documents([node], allow_update=True) # Add node to docstore
+                    storage_context.docstore.add_documents([node], allow_update=True)
             if storage_context.docstore.docs:
                  click.echo(f"[info] Populated docstore with {len(storage_context.docstore.docs)} nodes from the index.")
             else:
                  click.echo("[warning] Failed to populate docstore from index nodes.")
 
+        # 3. Query Expansion
+        full_query_text = " ".join(query_text)
+        queries_to_run = [QueryBundle(full_query_text)]
 
-    except Exception as e:
-        click.echo(f"[fatal] Failed to initialize Qdrant vector store or load index: {e}", err=True)
-        if _VERBOSE_OUTPUT:
-            import traceback
-            traceback.print_exc()
-        sys.exit(1)
+        # 4. Build Retriever
+        llama_filters = None
+        if filters_kv:
+            from llama_index.core.vector_stores import ExactMatchFilter, MetadataFilters
+            filter_conditions = []
+            for f_kv in filters_kv:
+                if "=" not in f_kv:
+                    click.echo(f"[warning] Invalid filter '{f_kv}', skipping. Must be key=value.", err=True)
+                    continue
+                key, value = f_kv.split("=", 1)
+                filter_conditions.append(ExactMatchFilter(key=key, value=value))
+            if filter_conditions:
+                llama_filters = MetadataFilters(filters=filter_conditions)
+                click.echo(f"[info] Applying metadata filters: {filters_kv}")
 
-    # 3. Query Expansion
-    full_query_text = " ".join(query_text)
-    queries_to_run = [QueryBundle(full_query_text)] # LlamaIndex uses QueryBundle
-
-    if use_query_expansion:
-        click.echo(f"[info] Expanding query: '{full_query_text}'")
-        
-        # Define a custom prompt for query expansion, incorporating max_expansions
-        # Ensure max_expansions is at least 1 for the prompt to make sense.
-        num_queries_to_generate = max(1, max_expansions) 
-        
-        custom_query_expansion_prompt_template_str = (
-            f"Given the following user query, generate up to {num_queries_to_generate} alternative queries "
-            "that can help retrieve more comprehensive and relevant information from a knowledge base.\n"
-            "These alternative queries should explore different angles, synonyms, related concepts, "
-            "or break down the original query into more specific sub-questions.\n"
-            "Ensure the generated queries are distinct and aim to cover a broader search space.\n\n"
-            "Original User Query:\n"
-            "{query_str}\n\n"
-            "Generated Alternative Queries (each on a new line, do not number them):\n"
-        )
-
-        question_gen = OpenAIQuestionGenerator.from_defaults(
-            llm=Settings.llm,
-            prompt_template_str=custom_query_expansion_prompt_template_str
-        )
-        
-        # Generate sub-questions or alternative queries
-        # The output format of generate needs to be handled. It's usually a list of SubQuestion objects.
-        # The 'generate' method of OpenAIQuestionGenerator expects 'num_questions' to be passed via metadata in QueryBundle or similar.
-        # However, the default behavior might generate a few questions based on the prompt.
-        # Let's try with the default generation first, then adjust if num_questions needs explicit passing.
-        # For now, we'll rely on the prompt to guide the number of questions implicitly or the generator's default.
-        # The `max_expansions` parameter will limit how many we use.
-        try:
-            # The generate method takes `tools` and `query` (QueryBundle)
-            # It seems `num_questions` is implicitly handled by the prompt or a default in the generator.
-            generated_items = question_gen.generate(tools=[], query=QueryBundle(full_query_text))
-            
-            # Assuming generated_items are SubQuestion objects with 'sub_question' attribute
-            # or similar structure that provides the generated question string.
-            expanded_q_texts = []
-            if isinstance(generated_items, list):
-                for item in generated_items:
-                    if hasattr(item, 'sub_question') and isinstance(item.sub_question, str):
-                        expanded_q_texts.append(item.sub_question)
-                    elif isinstance(item, str): # Sometimes it might return strings directly
-                        expanded_q_texts.append(item)
-            
-            # Clean up empty strings that might be generated
-            expanded_q_texts = [q.strip() for q in expanded_q_texts if q.strip()]
-            
-            if expanded_q_texts:
-                # Limit expansions and add original query
-                unique_expansions = list(dict.fromkeys(expanded_q_texts)) # Deduplicate
-                final_expansions = unique_expansions[:max_expansions]
-                
-                click.echo("\nExpanded queries:")
-                for i, exp_q_text in enumerate(final_expansions):
-                    click.echo(f"  {i+1}. {exp_q_text}")
-                    queries_to_run.append(QueryBundle(exp_q_text))
-                # Ensure original query is always included if not generated
-                if full_query_text not in final_expansions:
-                     queries_to_run.insert(0, QueryBundle(full_query_text)) # Ensure original is first
-                
-                # Deduplicate QueryBundles based on their string content
-                seen_query_strings = set()
-                unique_queries_to_run = []
-                for qb in queries_to_run:
-                    if qb.query_str not in seen_query_strings:
-                        unique_queries_to_run.append(qb)
-                        seen_query_strings.add(qb.query_str)
-                queries_to_run = unique_queries_to_run
-
-        except Exception as e:
-            click.echo(f"[warning] Query expansion failed: {e}. Using original query only.", err=True)
-            queries_to_run = [QueryBundle(full_query_text)]
-
-
-    # 4. Build Retriever
-    # Metadata filters
-    llama_filters = None
-    if filters_kv:
-        from llama_index.core.vector_stores import ExactMatchFilter, MetadataFilters
-        filter_conditions = []
-        for f_kv in filters_kv:
-            if "=" not in f_kv:
-                click.echo(f"[warning] Invalid filter '{f_kv}', skipping. Must be key=value.", err=True)
-                continue
-            key, value = f_kv.split("=", 1)
-            filter_conditions.append(ExactMatchFilter(key=key, value=value))
-        if filter_conditions:
-            llama_filters = MetadataFilters(filters=filter_conditions)
-            click.echo(f"[info] Applying metadata filters: {filters_kv}")
-
-    retriever: BaseRetriever
-    if use_hybrid_search:
-        click.echo("[info] Configuring Hybrid Retriever...")
-        dense_retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=similarity_top_k,
-            filters=llama_filters,
-            # vector_store_query_mode can be "DEFAULT" for dense only
-        )
-        
-        # For BM25Retriever, we need the nodes.
-        # This might be memory-intensive for very large indexes if we load all nodes.
-        # Alternative: retrieve more with dense, then BM25 on that subset.
-        # For now, loading all nodes from the docstore.
-        all_nodes: List[BaseNode] = []
-        try:
-            click.echo("[info] Loading all nodes from docstore for BM25Retriever (may take time for large indexes)...")
-            # Note: index.docstore.docs.values() gives Document objects, not BaseNode.
-            # We need to get nodes from the vector store or reconstruct them if BM25Retriever needs BaseNode.
-            # A simpler way if BM25Retriever can take documents:
-            # documents_for_bm25 = list(index.docstore.docs.values())
-            # bm25_retriever = BM25Retriever.from_defaults(documents=documents_for_bm25, similarity_top_k=sparse_top_k)
-            # However, BM25Retriever typically works with nodes.
-            # If index.vector_store has a way to get all nodes, that's better.
-            # QdrantVectorStore might not have a direct "get_all_nodes" that reconstructs them perfectly.
-            # Let's assume we can retrieve all nodes from the index's node_dict if populated,
-            # or iterate through the docstore and reconstruct.
-            # This part is crucial and might need adjustment based on how nodes are stored/accessible.
-            # For a VectorStoreIndex, nodes are usually in index.storage_context.docstore
-            # and index.index_struct contains the mapping.
-            # A robust way:
-            if hasattr(index, '_nodes_dict') and index._nodes_dict: # If nodes are directly in the index object
-                 all_nodes = list(index._nodes_dict.values())
-            elif hasattr(index.docstore, 'docs'): # Fallback to docstore, these are Document objects
-                 # BM25Retriever can often work with Document objects too by tokenizing their text.
-                 # Let's try with Document objects first for simplicity.
-                 # If BM25Retriever strictly needs BaseNode, this needs more work.
-                 # The from_defaults method of BM25Retriever can take `nodes` or `documents`.
-                 all_documents_for_bm25 = list(index.docstore.docs.values())
-                 if all_documents_for_bm25:
-                    click.echo(f"[info] Using {len(all_documents_for_bm25)} documents for BM25Retriever.")
-                 else: # Try to get nodes if documents are empty or not suitable
-                    click.echo("[warning] No documents in docstore, attempting to get nodes for BM25. This might be incomplete.")
-                    # This is a placeholder, proper node retrieval from vector store might be needed
-                    # For now, this will likely lead to an empty BM25 if not handled.
-                    # A common pattern is to build BM25 from a corpus loaded separately if not all nodes are easily retrievable.
-                    # For this exercise, we'll proceed assuming BM25Retriever can handle it or we'll note the limitation.
-                    pass # all_nodes remains empty if no direct way
-
-            if all_documents_for_bm25: # Prefer documents if available
-                bm25_retriever = BM25Retriever.from_defaults(
-                    documents=all_documents_for_bm25, # Pass Document objects
-                    similarity_top_k=sparse_top_k
-                )
-            elif all_nodes: # Fallback to nodes if documents not suitable/available
-                 bm25_retriever = BM25Retriever.from_defaults(
-                    nodes=all_nodes,
-                    similarity_top_k=sparse_top_k
-                )
-            else:
-                click.echo("[error] Could not load documents/nodes for BM25Retriever. Hybrid search might be ineffective for sparse part.", err=True)
-                # Create a dummy BM25 retriever that returns nothing
-                class DummySparseRetriever(BaseRetriever):
-                    async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
-                    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
-                bm25_retriever = DummySparseRetriever()
-
-
-            retriever = HybridRetriever(
-                dense_retriever=dense_retriever,
-                sparse_retriever=bm25_retriever,
-                # mode="OR" # Default mode, can be configured
-            )
-            click.echo("[info] Using LlamaIndex HybridRetriever (Dense + BM25).")
-
-        except Exception as e:
-            click.echo(f"[error] Failed to initialize BM25Retriever or HybridRetriever: {e}. Falling back to dense search.", err=True)
-            retriever = VectorIndexRetriever(
+        retriever: BaseRetriever
+        if use_hybrid_search:
+            click.echo("[info] Configuring Hybrid Retriever...")
+            dense_retriever = VectorIndexRetriever(
                 index=index,
                 similarity_top_k=similarity_top_k,
                 filters=llama_filters,
             )
-            click.echo("[info] Using Vector Retriever (fallback).")
-    else:
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=similarity_top_k,
-            filters=llama_filters,
-        )
-        click.echo("[info] Using Vector Retriever.")
-
-    # 5. Node Postprocessors (Reranking, Compression, MMR)
-    node_postprocessors_list: List[BaseNodePostprocessor] = [] # Renamed to avoid conflict
-
-    if use_mmr:
-        mmr_postprocessor = MMRNodePostprocessor(
-            embed_model=Settings.embed_model, # Necessary for MMR calculations
-            top_n=similarity_top_k, # Number of results to return after MMR
-            lambda_mult=mmr_lambda, # Control diversity vs relevance tradeoff
-        )
-        node_postprocessors_list.append(mmr_postprocessor)
-        click.echo(f"[info] Added MMRNodePostprocessor (will select diverse top {similarity_top_k}).")
-
-    # Add LongContextReorder to potentially improve LLM's focus on relevant parts
-    # This is generally useful if many documents are passed to the LLM.
-    # It should typically be applied after other filtering/reranking but before final synthesis.
-    # We can place it after MMR and before compression/final reranking.
-    try:
-        reorder_postprocessor = LongContextReorder()
-        node_postprocessors_list.append(reorder_postprocessor)
-        click.echo("[info] Added LongContextReorder postprocessor.")
-    except Exception as e_reorder:
-        click.echo(f"[warning] Failed to initialize LongContextReorder: {e_reorder}. Skipping.", err=True)
-
-    if compress_context_flag:
-        if final_cohere_api_key:
+            all_nodes_for_bm25: List[BaseNode] = [] # Renamed to avoid conflict with outer scope 'all_nodes' if any
             try:
-                # CohereRerank also acts as a compressor by selecting relevant snippets.
-                # Ensure top_n for CohereRerank is appropriate.
-                cohere_rerank_top_n = rerank_top_n if rerank_top_n > 0 else similarity_top_k
-                cohere_compressor = CohereRerank(api_key=final_cohere_api_key, top_n=cohere_rerank_top_n)
-                node_postprocessors_list.append(cohere_compressor)
-                click.echo(f"[info] Added CohereRerank for compression/reranking (top_n={cohere_rerank_top_n}).")
-            except ImportError:
-                 click.echo("[warning] CohereRerank not available (llama-index-postprocessor-cohere not installed?). Skipping compression.", err=True)
-            except Exception as e:
-                click.echo(f"[warning] Failed to initialize CohereRerank: {e}. Skipping compression.", err=True)
+                click.echo("[info] Loading documents/nodes from docstore for BM25Retriever...")
+                all_documents_for_bm25_retriever = list(index.docstore.docs.values())
+                if all_documents_for_bm25_retriever:
+                    click.echo(f"[info] Using {len(all_documents_for_bm25_retriever)} documents for BM25Retriever.")
+                    bm25_retriever = BM25Retriever.from_defaults(
+                        documents=all_documents_for_bm25_retriever,
+                        similarity_top_k=sparse_top_k
+                    )
+                else:
+                    click.echo("[error] Could not load documents for BM25Retriever. Sparse part of hybrid search will be ineffective.", err=True)
+                    class DummySparseRetriever(BaseRetriever): # Define dummy locally
+                        async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
+                        def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
+                    bm25_retriever = DummySparseRetriever()
+                
+                retriever = HybridRetriever(dense_retriever=dense_retriever, sparse_retriever=bm25_retriever)
+                click.echo("[info] Using LlamaIndex HybridRetriever (Dense + BM25).")
+            except Exception as e_hybrid:
+                click.echo(f"[error] Failed to initialize BM25Retriever or HybridRetriever: {e_hybrid}. Falling back to dense search.", err=True)
+                retriever = dense_retriever # Fallback to dense_retriever already initialized
+                click.echo("[info] Using Vector Retriever (fallback).")
         else:
-            click.echo("[info] Contextual compression enabled, but Cohere API key not found. True compression might not occur without it or a custom LLM compressor.")
-            # Placeholder for LLM-based compression could be added here if desired.
+            retriever = VectorIndexRetriever(index=index, similarity_top_k=similarity_top_k, filters=llama_filters)
+            click.echo("[info] Using Vector Retriever.")
 
-    # Add SentenceTransformerRerank if specified and CohereRerank (which also reranks) is not used for compression.
-    if rerank_top_n > 0 and not (compress_context_flag and final_cohere_api_key):
+        # 5. Node Postprocessors
+        node_postprocessors_list: List[BaseNodePostprocessor] = []
+        if use_mmr:
+            mmr_postprocessor = MMRNodePostprocessor(embed_model=Settings.embed_model, top_n=similarity_top_k, lambda_mult=mmr_lambda)
+            node_postprocessors_list.append(mmr_postprocessor)
+            click.echo(f"[info] Added MMRNodePostprocessor (top_n={similarity_top_k}).")
         try:
-            sbert_reranker = SentenceTransformerRerank(model=reranker_model, top_n=rerank_top_n, device="cpu") # Explicitly set device
-            node_postprocessors_list.append(sbert_reranker)
-            click.echo(f"[info] Added SentenceTransformerRerank (model: {reranker_model}, top_n: {rerank_top_n}).")
-        except ImportError:
-            click.echo("[warning] SentenceTransformerRerank not available (llama-index-postprocessor-sbert-rerank not installed?). Skipping reranking.", err=True)
-        except Exception as e:
-            click.echo(f"[warning] Failed to initialize SentenceTransformerRerank: {e}. Skipping.", err=True)
-            
-    # 6. Setup Response Synthesizer (QueryPipeline for retrieval is removed)
-    click.echo("[info] Setting up Response Synthesizer...")
-    response_synthesizer: BaseSynthesizer = get_response_synthesizer(
-        llm=Settings.llm,
-        # response_mode="refine" # Example, can be configured
-        # streaming=True, # If desired
-    )
+            reorder_postprocessor = LongContextReorder()
+            node_postprocessors_list.append(reorder_postprocessor)
+            click.echo("[info] Added LongContextReorder postprocessor.")
+        except Exception as e_reorder:
+            click.echo(f"[warning] Failed to initialize LongContextReorder: {e_reorder}. Skipping.", err=True)
 
-    # 7. Execute Query/Queries (Direct Retrieval and Manual Postprocessing)
-    click.echo(f"\n[info] Executing query: {full_query_text}")
-    if len(queries_to_run) > 1:
-        click.echo(f"[info] Using {len(queries_to_run)-1} expanded queries as well.")
-
-    all_retrieved_nodes_with_score: Dict[str, NodeWithScore] = {}
-
-    for q_bundle in queries_to_run:
-        if _VERBOSE_OUTPUT and q_bundle.query_str != full_query_text:
-            click.echo(f"[info] Retrieving for expanded query: {q_bundle.query_str}")
-
-        # Direct retrieval
-        retrieved_nodes_for_query: List[NodeWithScore] = await retriever.aretrieve(q_bundle)
-        
-        if _VERBOSE_OUTPUT:
-            click.echo(f"[info] Retrieved {len(retrieved_nodes_for_query)} nodes for query '{q_bundle.query_str}' before postprocessing.")
-
-        # Manual postprocessing
-        current_processed_nodes = retrieved_nodes_for_query
-        if node_postprocessors_list:
-            if _VERBOSE_OUTPUT:
-                click.echo(f"[info] Applying {len(node_postprocessors_list)} postprocessor(s) to {len(current_processed_nodes)} nodes...")
-            for postprocessor_idx, postprocessor_obj in enumerate(node_postprocessors_list):
-                if _VERBOSE_OUTPUT:
-                    click.echo(f"[info] Applying postprocessor {postprocessor_idx+1}/{len(node_postprocessors_list)}: {type(postprocessor_obj).__name__}")
-                # The postprocess_nodes method is synchronous in BaseNodePostprocessor
-                # If an async version is available/needed, this would need adjustment.
-                # For now, assuming synchronous postprocessing is acceptable within this async function.
-                # Some postprocessors might have async versions, e.g. `async_postprocess_nodes`
-                if hasattr(postprocessor_obj, 'async_postprocess_nodes'):
-                    current_processed_nodes = await postprocessor_obj.async_postprocess_nodes(
-                        nodes=current_processed_nodes, query_bundle=q_bundle
-                    )
-                else: # Fallback to synchronous
-                    current_processed_nodes = postprocessor_obj.postprocess_nodes(
-                        nodes=current_processed_nodes, query_bundle=q_bundle
-                    )
-                if _VERBOSE_OUTPUT:
-                    click.echo(f"[info] Nodes after {type(postprocessor_obj).__name__}: {len(current_processed_nodes)}")
-        
-        if _VERBOSE_OUTPUT:
-             click.echo(f"[info] Processed {len(current_processed_nodes)} nodes for query '{q_bundle.query_str}'.")
-
-        for node_ws in current_processed_nodes:
-            if node_ws.node.node_id not in all_retrieved_nodes_with_score:
-                all_retrieved_nodes_with_score[node_ws.node.node_id] = node_ws
-            else: 
-                if (node_ws.score or 0.0) > (all_retrieved_nodes_with_score[node_ws.node.node_id].score or 0.0):
-                    all_retrieved_nodes_with_score[node_ws.node.node_id] = node_ws
-    
-    merged_retrieved_nodes_list = sorted(all_retrieved_nodes_with_score.values(), key=lambda nw: nw.score or 0.0, reverse=True)
-    
-    # Synthesize with the final merged and processed nodes
-    click.echo(f"[info] Synthesizing response from {len(merged_retrieved_nodes_list)} merged and processed nodes.")
-    final_response = await response_synthesizer.asynthesize(
-        query=QueryBundle(full_query_text), 
-        nodes=merged_retrieved_nodes_list
-    )
-    final_retrieved_nodes_list = merged_retrieved_nodes_list # For raw output and evaluation
-
-
-    if raw_output_flag:
-        click.secho("\n--- Retrieved Nodes ---", fg="yellow")
-        if not final_retrieved_nodes_list:
-            click.echo("No nodes retrieved.")
-        for idx, node_ws in enumerate(final_retrieved_nodes_list):
-            click.echo(f"\n[Node {idx+1}] ID: {node_ws.node.node_id}, Score: {node_ws.score}") # Show raw score, could be nan
-            click.echo(f"Source: {node_ws.metadata.get('source', 'N/A')}")
-            
-            # Prioritize Cohere compressed snippet if available
-            if compress_context_flag and final_cohere_api_key and "document_with_score" in node_ws.metadata and "text" in node_ws.metadata["document_with_score"]:
-                snippet = node_ws.metadata["document_with_score"]["text"]
-                click.echo(f"Compressed Snippet (Cohere): {snippet[:500]}...") # Show more
+        if compress_context_flag:
+            if final_cohere_api_key:
+                try:
+                    cohere_rerank_top_n = rerank_top_n if rerank_top_n > 0 else similarity_top_k
+                    cohere_compressor = CohereRerank(api_key=final_cohere_api_key, top_n=cohere_rerank_top_n)
+                    node_postprocessors_list.append(cohere_compressor)
+                    click.echo(f"[info] Added CohereRerank for compression/reranking (top_n={cohere_rerank_top_n}).")
+                except ImportError:
+                     click.echo("[warning] CohereRerank not available. Skipping compression.", err=True)
+                except Exception as e_cohere:
+                    click.echo(f"[warning] Failed to initialize CohereRerank: {e_cohere}. Skipping compression.", err=True)
             else:
-                # Otherwise, show the main text content of the node
-                snippet = node_ws.node.get_content(metadata_mode="none") # Get only text content
-                click.echo(f"Snippet: {snippet[:500]}...") # Show more
-        click.secho("--- End Retrieved Nodes ---", fg="yellow")
+                click.echo("[info] Contextual compression requested, but Cohere API key not found.")
 
-    click.secho("\n[Generated Answer]", fg="green")
-    click.echo(str(final_response).strip()) # Keep printing for CLI usage
+        if rerank_top_n > 0 and not (compress_context_flag and final_cohere_api_key):
+            try:
+                sbert_reranker = SentenceTransformerRerank(model=reranker_model, top_n=rerank_top_n, device="cpu")
+                node_postprocessors_list.append(sbert_reranker)
+                click.echo(f"[info] Added SentenceTransformerRerank (model: {reranker_model}, top_n: {rerank_top_n}).")
+            except ImportError:
+                click.echo("[warning] SentenceTransformerRerank not available. Skipping reranking.", err=True)
+            except Exception as e_sbert:
+                click.echo(f"[warning] Failed to initialize SentenceTransformerRerank: {e_sbert}. Skipping.", err=True)
+        
+        # 6. Setup Response Synthesizer
+        click.echo("[info] Setting up Response Synthesizer...")
+        response_synthesizer: BaseSynthesizer = get_response_synthesizer(llm=Settings.llm)
 
-    # 8. Evaluation (Optional)
-    if evaluate_rag_flag:
-        if not globals().get('evaluation_available', False):
-            click.echo("\n[warning] Evaluation was requested but llama-index-evaluation module is not available. Skipping evaluation.", err=True)
-        else:
-            click.echo("\n[info] Evaluating RAG response quality...")
-            # Prepare evaluators
-            eval_llm = Settings.llm # Use the same LLM or a dedicated one for evaluation
+        # 7. Execute Query/Queries
+        click.echo(f"\n[info] Executing query: {full_query_text}")
+
+        all_retrieved_nodes_with_score: Dict[str, NodeWithScore] = {}
+        for q_bundle in queries_to_run: # This loop will now run only once
+            if _VERBOSE_OUTPUT and q_bundle.query_str != full_query_text: # This condition will likely not be met
+                click.echo(f"[info] Retrieving for expanded query: {q_bundle.query_str}")
+            retrieved_nodes_for_query: List[NodeWithScore] = await retriever.aretrieve(q_bundle)
+            if _VERBOSE_OUTPUT:
+                click.echo(f"[info] Retrieved {len(retrieved_nodes_for_query)} nodes for query '{q_bundle.query_str}' before postprocessing.")
             
-            relevancy_eval = RelevancyEvaluator(llm=eval_llm)
-
-            # Context for evaluation is the text from retrieved nodes
-            eval_context = "\n\n---\n\n".join([node_ws.node.get_content() for node_ws in final_retrieved_nodes_list])
+            current_processed_nodes = retrieved_nodes_for_query
+            if node_postprocessors_list:
+                if _VERBOSE_OUTPUT: click.echo(f"[info] Applying {len(node_postprocessors_list)} postprocessor(s)...")
+                for post_idx, post_obj in enumerate(node_postprocessors_list):
+                    if _VERBOSE_OUTPUT: click.echo(f"[info] Applying {type(post_obj).__name__}...")
+                    if hasattr(post_obj, 'async_postprocess_nodes'):
+                        current_processed_nodes = await post_obj.async_postprocess_nodes(nodes=current_processed_nodes, query_bundle=q_bundle)
+                    else:
+                        current_processed_nodes = post_obj.postprocess_nodes(nodes=current_processed_nodes, query_bundle=q_bundle)
+                    if _VERBOSE_OUTPUT: click.echo(f"[info] Nodes after {type(post_obj).__name__}: {len(current_processed_nodes)}")
             
-            eval_result_relevancy = relevancy_eval.evaluate_response(query=full_query_text, response=final_response, contexts=[eval_context])
+            if _VERBOSE_OUTPUT: click.echo(f"[info] Processed {len(current_processed_nodes)} nodes for query '{q_bundle.query_str}'.")
+            for node_ws in current_processed_nodes:
+                if node_ws.node.node_id not in all_retrieved_nodes_with_score or \
+                   (node_ws.score or 0.0) > (all_retrieved_nodes_with_score[node_ws.node.node_id].score or 0.0):
+                    all_retrieved_nodes_with_score[node_ws.node.node_id] = node_ws
+        
+        merged_retrieved_nodes_list = sorted(all_retrieved_nodes_with_score.values(), key=lambda nw: nw.score or 0.0, reverse=True)
+        
+        click.echo(f"[info] Synthesizing response from {len(merged_retrieved_nodes_list)} merged and processed nodes.")
+        final_response = await response_synthesizer.asynthesize(query=QueryBundle(full_query_text), nodes=merged_retrieved_nodes_list)
+        final_retrieved_nodes_list = merged_retrieved_nodes_list
 
-            click.secho("\n--- RAG Quality Evaluation ---", fg="cyan")
-            click.echo(f"Relevancy: {eval_result_relevancy.passing} (Score: {eval_result_relevancy.score:.2f})")
-            click.echo(f"Feedback (Relevancy): {eval_result_relevancy.feedback}")
-            click.secho("--- End RAG Quality Evaluation ---", fg="cyan")
+        if raw_output_flag:
+            click.secho("\n--- Retrieved Nodes ---", fg="yellow")
+            if not final_retrieved_nodes_list: click.echo("No nodes retrieved.")
+            for idx, node_ws in enumerate(final_retrieved_nodes_list):
+                click.echo(f"\n[Node {idx+1}] ID: {node_ws.node.node_id}, Score: {node_ws.score}")
+                click.echo(f"Source: {node_ws.metadata.get('source', 'N/A')}")
+                snippet_to_show = node_ws.node.get_content(metadata_mode="none")[:500] + "..."
+                if compress_context_flag and final_cohere_api_key and "document_with_score" in node_ws.metadata and "text" in node_ws.metadata["document_with_score"]:
+                    snippet_to_show = node_ws.metadata["document_with_score"]["text"][:500] + "..."
+                click.echo(f"Snippet: {snippet_to_show}")
+            click.secho("--- End Retrieved Nodes ---", fg="yellow")
+
+        click.secho("\n[Generated Answer]", fg="green")
+        click.echo(str(final_response).strip())
+        response_value = str(final_response).strip()
+
+        # 8. Evaluation (Optional)
+        if evaluate_rag_flag:
+            if not evaluation_available:
+                click.echo("\n[warning] Evaluation requested but module not available. Skipping.", err=True)
+            else:
+                click.echo("\n[info] Evaluating RAG response quality...")
+                eval_llm = Settings.llm
+                relevancy_eval = RelevancyEvaluator(llm=eval_llm)
+                eval_context = "\n\n---\n\n".join([node_ws.node.get_content() for node_ws in final_retrieved_nodes_list])
+                eval_result_relevancy = relevancy_eval.evaluate_response(query=full_query_text, response=final_response, contexts=[eval_context])
+                click.secho("\n--- RAG Quality Evaluation ---", fg="cyan")
+                click.echo(f"Relevancy: {eval_result_relevancy.passing} (Score: {eval_result_relevancy.score:.2f})")
+                click.echo(f"Feedback (Relevancy): {eval_result_relevancy.feedback}")
+                click.secho("--- End RAG Quality Evaluation ---", fg="cyan")
+        
+    finally:
+        if async_qdrant_client: # This check is important
+            if _VERBOSE_OUTPUT:
+                click.echo("[info] Closing AsyncQdrantClient in finally block...")
+            await async_qdrant_client.close()
+            if _VERBOSE_OUTPUT:
+                click.echo("[info] AsyncQdrantClient closed in finally block.")
     
-    return str(final_response).strip() # Return the answer string
+    return response_value # Return the captured response value
+
 
 # Create a Click command that wraps the async function
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--collection-name", default="rag_llamaindex_data", show_default=True, help="Qdrant collection name.")
-@click.option("--k", "similarity_top_k", type=int, default=10, show_default=True, help="Number of top similar results to retrieve.")
+@click.option("--k", "similarity_top_k", type=int, default=100, show_default=True, help="Number of top similar results to retrieve.") # Changed default
 @click.option("--qdrant-url", default="http://localhost:6333", show_default=True, help="Qdrant URL.")
 @click.option("--qdrant-api-key", envvar="QDRANT_API_KEY", default=None, help="Qdrant API key.")
 @click.option("--openai-api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key.")
 @click.option("--openai-model-embedding", default="text-embedding-3-large", show_default=True, help="OpenAI embedding model.")
 @click.option("--openai-model-llm", default="gpt-4.1-mini", show_default=True, help="OpenAI LLM for answer generation.")
+@click.option("--llm-temperature", type=float, default=0.3, show_default=True, help="Temperature for the LLM (lower for factual, higher for creative). Default is 0.3 for more focused RAG.")
 @click.option("--raw-output/--no-raw-output", "raw_output_flag", default=False, help="Show raw retrieval nodes and then the answer.")
 @click.option("--hybrid/--no-hybrid", "use_hybrid_search", default=True, show_default=True, help="Enable hybrid (vector + sparse) search.")
-@click.option("--sparse-top-k", type=int, default=10, show_default=True, help="Number of sparse results for hybrid search.")
+@click.option("--sparse-top-k", type=int, default=100, show_default=True, help="Number of sparse results for hybrid search.") # Changed default
 @click.option("--rerank-top-n", type=int, default=0, show_default=True, help="Re-rank top N results using a cross-encoder (0 to disable).")
 @click.option("--reranker-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2", help="Cross-encoder model for reranking.")
-@click.option("--mmr/--no-mmr", "use_mmr", default=False, help="Use Maximal Marginal Relevance (MMR) for re-ranking.")
+@click.option("--mmr/--no-mmr", "use_mmr", default=True, help="Use Maximal Marginal Relevance (MMR) for re-ranking.")
 @click.option("--mmr-lambda", type=float, default=0.5, show_default=True, help="Lambda for MMR (0=max diversity, 1=max relevance).")
 @click.option("--filter", "-f", "filters_kv", multiple=True, help="Metadata filter key=value (e.g., document_type=academic).")
-@click.option("--expand-query/--no-expand-query", "use_query_expansion", default=True, help="Enable query expansion.")
-@click.option("--max-expansions", type=int, default=3, show_default=True, help="Max number of expanded queries (excluding original).")
 @click.option("--evaluate-rag/--no-evaluate-rag", "evaluate_rag_flag", default=False, help="Evaluate RAG quality and show feedback.")
 @click.option("--compress-context/--no-compress-context", "compress_context_flag", default=False, help="Apply contextual compression (e.g., via CohereRerank if API key available).")
 @click.option("--cohere-api-key", envvar="COHERE_API_KEY", default=None, help="Cohere API key (for CohereRerank compression).")
 @click.option("--verbose", is_flag=True, default=False, help="Enable verbose output.")
 @click.argument("query_text", nargs=-1, required=True)
-@click.pass_context # Pass context to get all params
-def cli_entrypoint(ctx, **kwargs):
+# @click.pass_context # No longer needed as ctx is not used directly for param passing
+def cli_entrypoint(
+    collection_name: str,
+    similarity_top_k: int,
+    qdrant_url: str,
+    qdrant_api_key: str | None,
+    openai_api_key: str | None,
+    openai_model_embedding: str,
+    openai_model_llm: str,
+    llm_temperature: float,
+    raw_output_flag: bool,
+    use_hybrid_search: bool,
+    sparse_top_k: int,
+    rerank_top_n: int,
+    reranker_model: str,
+    use_mmr: bool,
+    mmr_lambda: float,
+    filters_kv: Sequence[str],
+    evaluate_rag_flag: bool,
+    compress_context_flag: bool,
+    cohere_api_key: str | None,
+    verbose: bool,
+    query_text: Sequence[str],
+):
     """Synchronous entry point for Click that runs the async main logic."""
+    # Capture all parameters passed to this function into a dictionary
+    params_for_main_async = locals()
+    
     import asyncio
-    asyncio.run(main_async(**kwargs))
+    asyncio.run(main_async(**params_for_main_async))
 
 if __name__ == "__main__":
     cli_entrypoint()

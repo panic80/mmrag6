@@ -6,6 +6,7 @@ import requests
 from pathlib import Path # Added import
 import openai # Added for OpenAI API
 import shlex # Already present, but good to note
+import sys # Added for print to stderr
 
 # LlamaIndex imports for /ask
 from llama_index.core import (
@@ -240,7 +241,7 @@ def handle_slash():
                     # matching query_llamaindex.py's Click options.
                     
                     # Convert text (string) to a sequence of strings for query_text param
-                    query_args_list = shlex.split(query_text_param)
+                    # query_args_list = shlex.split(query_text_param) # Will be defined after flag parsing
 
 
                     # Default values from query_llamaindex.py CLI options
@@ -249,7 +250,7 @@ def handle_slash():
                     # A more robust solution might involve a config object.
                     
                     # Fetching from environment or using defaults from query_llamaindex.py
-                    similarity_top_k_val = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 10))
+                    # similarity_top_k_val = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 10)) # Replaced by dynamic kwargs
                     qdrant_url_val = os.environ.get("QDRANT_URL", "http://qdrant:6333") # Match Docker Compose
                     qdrant_api_key_val = os.environ.get("QDRANT_API_KEY")
                     # openai_api_key is already fetched
@@ -260,18 +261,43 @@ def handle_slash():
                     # These could also be exposed via environment variables if more control is needed from server.py
                     raw_output_flag_val = os.environ.get("RETRIEVAL_RAW_OUTPUT", "False").lower() == "true"
                     use_hybrid_search_val = os.environ.get("RETRIEVAL_USE_HYBRID", "True").lower() == "true"
-                    sparse_top_k_val = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 10))
+                    # sparse_top_k_val = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 10)) # Replaced by dynamic kwargs
                     rerank_top_n_val = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 0)) # Default 0 (disabled)
                     reranker_model_val = os.environ.get("RETRIEVAL_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-                    use_mmr_val = os.environ.get("RETRIEVAL_USE_MMR", "False").lower() == "true"
+                    
+                    # Determine use_mmr_val: Default to True, allow --no-mmr to override.
+                    use_mmr_val = True # Default to ON
+                    original_query_text_param_for_logging = query_text_param # For logging
+
+                    temp_query_parts = shlex.split(query_text_param)
+                    cleaned_query_parts = []
+                    explicit_mmr_setting_found = False
+
+                    for part in temp_query_parts:
+                        if part == "--no-mmr":
+                            use_mmr_val = False
+                            explicit_mmr_setting_found = True
+                        elif part == "--mmr": # Explicitly asking for MMR
+                            use_mmr_val = True # Reinforce, though it's already default
+                            explicit_mmr_setting_found = True
+                        else:
+                            cleaned_query_parts.append(part)
+
+                    if explicit_mmr_setting_found:
+                        query_text_param = " ".join(cleaned_query_parts)
+                        app.logger.info(f"Explicit MMR flag found. Setting use_mmr to {use_mmr_val}. Cleaned query: '{query_text_param}'")
+                    else:
+                        # No explicit flag, use_mmr_val remains True (our hardcoded default)
+                        app.logger.info(f"No explicit MMR flag. Defaulting use_mmr to {use_mmr_val}.")
+                    
+                    # query_args_list should now be based on the potentially cleaned query_text_param
+                    query_args_list = shlex.split(query_text_param)
+                    
                     mmr_lambda_val = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.5))
                     
                     # Filters: For now, not supporting dynamic filters from slash command in this integration.
                     # This could be added by parsing 'text' for filter arguments.
                     filters_kv_val = [] 
-                    
-                    use_query_expansion_val = os.environ.get("RETRIEVAL_USE_QUERY_EXPANSION", "True").lower() == "true"
-                    max_expansions_val = int(os.environ.get("RETRIEVAL_MAX_EXPANSIONS", 3))
                     
                     evaluate_rag_flag_val = False # Evaluation not typically run in server context
                     compress_context_flag_val = os.environ.get("RETRIEVAL_COMPRESS_CONTEXT", "False").lower() == "true"
@@ -286,7 +312,41 @@ def handle_slash():
                     # This is a significant change to query_llamaindex.py that would be needed.
                     #
                     # Now that query_main_async returns the answer, we can use it directly.
-                    app.logger.info(f"Calling advanced query pipeline from query_llamaindex.main_async for query: '{query_text_param}'")
+                    app.logger.info(f"Calling advanced query pipeline from query_llamaindex.main_async for query: '{original_query_text_param_for_logging}' (effective query for retrieval: '{query_text_param}')")
+                    
+                    # Prepare dynamic keyword arguments for query_main_async
+                    query_kwargs = {} # DEFINED EARLIER
+
+                    env_similarity_top_k = os.environ.get("RETRIEVAL_SIMILARITY_TOP_K")
+                    if env_similarity_top_k is not None:
+                        try:
+                            query_kwargs['similarity_top_k'] = int(env_similarity_top_k)
+                        except ValueError:
+                            print(f"[WARNING] Invalid RETRIEVAL_SIMILARITY_TOP_K: {env_similarity_top_k}. query_llamaindex.py default will be used.", file=sys.stderr)
+
+                    env_sparse_top_k = os.environ.get("RETRIEVAL_SPARSE_TOP_K")
+                    if env_sparse_top_k is not None:
+                        try:
+                            query_kwargs['sparse_top_k'] = int(env_sparse_top_k)
+                        except ValueError:
+                            print(f"[WARNING] Invalid RETRIEVAL_SPARSE_TOP_K: {env_sparse_top_k}. query_llamaindex.py default will be used.", file=sys.stderr)
+                    
+                    # Logging block should come AFTER query_kwargs is populated
+                    print("----------------------------------------------------", file=sys.stderr)
+                    print(f"Calling query_main_async with effective parameters:", file=sys.stderr)
+                    print(f"  query_text_param (cleaned for query_args_list): '{query_text_param}'", file=sys.stderr)
+                    print(f"  query_args_list: {query_args_list}", file=sys.stderr)
+                    print(f"  collection_name: {collection_name_param}", file=sys.stderr)
+                    # Updated logging for dynamic kwargs
+                    print(f"  similarity_top_k: {query_kwargs.get('similarity_top_k', 'Default in query_llamaindex.py')}", file=sys.stderr)
+                    print(f"  use_hybrid_search: {use_hybrid_search_val}", file=sys.stderr)
+                    print(f"  sparse_top_k: {query_kwargs.get('sparse_top_k', 'Default in query_llamaindex.py')}", file=sys.stderr)
+                    print(f"  rerank_top_n: {rerank_top_n_val}", file=sys.stderr)
+                    print(f"  use_mmr: {use_mmr_val}", file=sys.stderr) # CRITICAL VALUE TO CHECK
+                    print(f"  mmr_lambda: {mmr_lambda_val}", file=sys.stderr)
+                    print(f"  compress_context_flag: {compress_context_flag_val}", file=sys.stderr)
+                    print(f"  verbose: {verbose_val}", file=sys.stderr)
+                    print("----------------------------------------------------", file=sys.stderr)
                     
                     # Ensure an event loop is running if not already (e.g., if Flask runs in a non-async context)
                     try:
@@ -297,7 +357,6 @@ def handle_slash():
 
                     answer_text = loop.run_until_complete(query_main_async(
                         collection_name=collection_name_param, # Use the collection name determined by server
-                        similarity_top_k=similarity_top_k_val,
                         qdrant_url=qdrant_url_val,
                         qdrant_api_key=qdrant_api_key_val,
                         openai_api_key=openai_api_key, # Already fetched
@@ -305,19 +364,18 @@ def handle_slash():
                         openai_model_llm=openai_model_llm_val,
                         raw_output_flag=raw_output_flag_val,
                         use_hybrid_search=use_hybrid_search_val,
-                        sparse_top_k=sparse_top_k_val,
+                        # sparse_top_k is now in query_kwargs
                         rerank_top_n=rerank_top_n_val,
                         reranker_model=reranker_model_val,
                         use_mmr=use_mmr_val,
                         mmr_lambda=mmr_lambda_val,
                         filters_kv=filters_kv_val,
-                        use_query_expansion=use_query_expansion_val,
-                        max_expansions=max_expansions_val,
                         evaluate_rag_flag=evaluate_rag_flag_val,
                         compress_context_flag=compress_context_flag_val,
                         cohere_api_key=cohere_api_key_val,
                         verbose=verbose_val,
-                        query_text=query_args_list # This is the shlex.split list of query words
+                        query_text=query_args_list, # This is the shlex.split list of query words
+                        **query_kwargs
                     ))
                     
                     if not answer_text: # Handle case where query_main_async might return None or empty on error
@@ -331,7 +389,7 @@ def handle_slash():
                     answer_text = f"An error occurred while processing your query with LlamaIndex. Details: {e}"
 
                 # Compose final message
-                final_msg = f"**Q:** {query_text_param}\n\n**A:**\n{answer_text}" # Use query_text_param
+                final_msg = f"**Q:** {original_query_text_param_for_logging}\n\n**A:**\n{answer_text}" # Use original for Q display
                 _post_message(final_msg)
 
             # Always run asynchronously
@@ -344,87 +402,70 @@ def handle_slash():
             import shlex
             def run_inject():
                 """Handle the /inject (or /injest) command in a background thread.
-
-                All progress lines are buffered and posted at the end as **one**
-                consolidated message so the channel isn’t flooded.
+                Sends real-time, concise updates to the Mattermost channel.
                 """
                 import requests
-                import shlex
-                import uuid
                 import os
                 import sys
                 import tempfile
-                import urllib.parse
-                # Removed: from ingest_rag import get_openai_client, load_documents, embed_and_upsert, ensure_collection, Document
-                from qdrant_client import QdrantClient # Keep for potential direct Qdrant operations if any remain
+                import traceback # For logging full exceptions
+                from qdrant_client import QdrantClient
+                # shlex is imported in the outer scope
+                # Path is imported globally
 
-                # ------------------------------------------------------------------
-                # Buffering: collect all progress lines and send once at the end
-                # ------------------------------------------------------------------
+                # Mattermost connection details from outer scope:
+                # response_url, channel_id, mattermost_url, mattermost_token, text (for args)
+                # app.logger is also available.
 
-                buffered: list[str] = []
-
-                def post(msg: str):
-                    """Collect progress lines instead of posting immediately."""
-                    buffered.append(msg)
-
-                # Helper to send the final combined message (reuses logic from /ask)
                 rest_usable: dict[str, bool] = {"ok": bool(mattermost_url and mattermost_token and channel_id)}
 
-                def _post_combined():
-                    if not buffered:
+                def _send_message_to_mattermost(message_text: str):
+                    """Sends a message immediately to the Mattermost channel."""
+                    if not message_text: # Avoid sending empty messages
                         return
-                    joined = "\n".join(buffered)
-                    MAX_LEN = 3500
 
-                    # Send in chunks to stay below Mattermost's limit
-                    def _send(msg_part: str):
-                        if rest_usable["ok"]:
-                            try:
-                                hdrs = {"Authorization": f"Bearer {mattermost_token}"}
-                                resp = requests.post(
-                                    f"{mattermost_url}/api/v4/posts",
-                                    headers=hdrs,
-                                    json={"channel_id": channel_id, "message": msg_part},
-                                    timeout=10,
-                                )
-                                if resp.status_code in (200, 201):
-                                    return True
-                                if resp.status_code in (401, 403):
-                                    rest_usable["ok"] = False
-                            except Exception:
+                    if rest_usable["ok"]:
+                        try:
+                            hdrs = {"Authorization": f"Bearer {mattermost_token}"}
+                            resp = requests.post(
+                                f"{mattermost_url}/api/v4/posts",
+                                headers=hdrs,
+                                json={"channel_id": channel_id, "message": message_text},
+                                timeout=10,
+                            )
+                            if resp.status_code in (200, 201):
+                                return
+                            if resp.status_code in (401, 403): # Token issue
                                 rest_usable["ok"] = False
-                        # Fallback to response_url
-                        if response_url:
-                            try:
-                                requests.post(
-                                    response_url,
-                                    json={"response_type": "in_channel", "text": msg_part},
-                                    timeout=10,
+                                app.logger.warning("Mattermost REST API auth failed (401/403). Falling back to response_url for subsequent messages.")
+                            else:
+                                app.logger.warning(
+                                    "Mattermost REST API post failed with status %s: %s. Falling back to response_url.",
+                                    resp.status_code, resp.text
                                 )
-                                return True
-                            except Exception:
-                                app.logger.exception("Failed to post combined message via response_url")
-                        return False
-
-                    for start in range(0, len(joined), MAX_LEN):
-                        _send(joined[start : start + MAX_LEN])
-                    return
-
-
-                # ----------------------------------------------------------
-                # Main ingestion logic – any return path will still execute
-                # the *finally* block below to post the combined message.
-                # ----------------------------------------------------------
-                try:
-                    args = shlex.split(text or "")
-                    # Logic for /inject command using ingest_llamaindex.py
+                        except requests.exceptions.RequestException as e_req:
+                            rest_usable["ok"] = False
+                            app.logger.exception(f"Mattermost REST API request failed: {e_req}. Falling back to response_url.")
                     
+                    if response_url:
+                        try:
+                            requests.post(
+                                response_url,
+                                json={"response_type": "in_channel", "text": message_text},
+                                timeout=10,
+                            )
+                            return
+                        except requests.exceptions.RequestException as e_resp_url:
+                            app.logger.exception(f"Failed to post to response_url: {e_resp_url}")
+                    
+                    app.logger.error(f"Failed to send message to Mattermost by any method: {message_text}")
+
+                # Main ingestion logic
+                try:
                     raw_args_from_text = shlex.split(text or "")
                     
-                    # Determine collection name from raw_args_from_text
-                    collection_name = os.environ.get("QDRANT_COLLECTION_NAME", "rag_llamaindex_data") # Default
-                    temp_collection_args = [] # Store collection related args to remove later
+                    collection_name = os.environ.get("QDRANT_COLLECTION_NAME", "rag_llamaindex_data")
+                    temp_collection_args = []
 
                     if "--collection-name" in raw_args_from_text:
                         try:
@@ -432,197 +473,189 @@ def handle_slash():
                             collection_name = raw_args_from_text[idx + 1]
                             temp_collection_args.extend([raw_args_from_text[idx], raw_args_from_text[idx+1]])
                         except (ValueError, IndexError):
-                            post("⚠️ Invalid --collection-name usage. Using default or environment variable.")
-                    elif "-c" in raw_args_from_text: # Support -c as an alias
+                            _send_message_to_mattermost("⚠️ Invalid --collection-name usage. Using default or environment variable.")
+                    elif "-c" in raw_args_from_text:
                         try:
                             idx = raw_args_from_text.index("-c")
                             collection_name = raw_args_from_text[idx + 1]
                             temp_collection_args.extend([raw_args_from_text[idx], raw_args_from_text[idx+1]])
                         except (ValueError, IndexError):
-                            post("⚠️ Invalid -c usage for collection name. Using default or environment variable.")
+                            _send_message_to_mattermost("⚠️ Invalid -c usage for collection name. Using default or environment variable.")
                     
                     is_purge_command = "--purge" in raw_args_from_text
                     
                     if is_purge_command:
-                        post(f"ℹ️ Purge command received for collection '{collection_name}'.")
-                        qdrant_url_env = os.environ.get("QDRANT_URL", "http://localhost:6333")
+                        _send_message_to_mattermost(f"ℹ️ Purge command received for collection '{collection_name}'.")
+                        qdrant_url_env = os.environ.get("QDRANT_URL", "http://qdrant:6333") # Match Docker Compose
                         qdrant_api_key_env = os.environ.get("QDRANT_API_KEY")
                         
                         try:
                             q_client = QdrantClient(url=qdrant_url_env, api_key=qdrant_api_key_env)
                             q_client.delete_collection(collection_name=collection_name)
-                            post(f"✅ Successfully deleted collection '{collection_name}'.")
+                            _send_message_to_mattermost(f"✅ Successfully deleted collection '{collection_name}'.")
                         except Exception as e_del:
-                            # Qdrant client might raise specific exceptions for "not found"
-                            # For simplicity, we catch a broad exception.
-                            post(f"⚠️ Could not delete collection '{collection_name}' (it might not exist or Qdrant error): {e_del}")
+                            app.logger.error(f"Failed to delete Qdrant collection '{collection_name}': {e_del}\n{traceback.format_exc()}")
+                            _send_message_to_mattermost(f"⚠️ Could not delete collection '{collection_name}'. It might not exist or an error occurred. Check server logs.")
                         
-                        try:
+                        try: # Recreate collection
                             from qdrant_client.http import models as qdrant_models
-                            vector_size = int(os.environ.get("DEFAULT_VECTOR_SIZE", 3072)) # Default or from env
+                            vector_size = int(os.environ.get("DEFAULT_VECTOR_SIZE", 3072))
+                            # Ensure q_client is initialized if previous block failed partially
+                            if 'q_client' not in locals():
+                                q_client = QdrantClient(url=qdrant_url_env, api_key=qdrant_api_key_env)
+
                             q_client.recreate_collection(
                                 collection_name=collection_name,
-                                vectors_config=qdrant_models.VectorParams(
-                                    size=vector_size, 
-                                    distance=qdrant_models.Distance.COSINE # Common default
-                                )
+                                vectors_config=qdrant_models.VectorParams(size=vector_size, distance=qdrant_models.Distance.COSINE)
                             )
-                            post(f"✅ Successfully recreated empty collection '{collection_name}' with vector size {vector_size}.")
+                            _send_message_to_mattermost(f"✅ Successfully recreated empty collection '{collection_name}' (vector size: {vector_size}).")
                         except Exception as e_recreate:
-                            post(f"❌ Failed to recreate collection '{collection_name}': {e_recreate}")
-                            _post_combined() # Post messages gathered so far
+                            app.logger.error(f"Failed to recreate Qdrant collection '{collection_name}': {e_recreate}\n{traceback.format_exc()}")
+                            _send_message_to_mattermost(f"❌ Failed to recreate collection '{collection_name}'. Check server logs.")
                             return # Stop if recreate fails
 
-                        # Check if it was a purge-only command
-                        # Remove --purge and collection flags/values to see if other args (sources) remain
-                        args_for_source_check = [
-                            arg for arg in raw_args_from_text 
-                            if arg != "--purge" and arg not in temp_collection_args
-                        ]
+                        args_for_source_check = [arg for arg in raw_args_from_text if arg != "--purge" and arg not in temp_collection_args]
                         is_purge_only = not any(not arg.startswith("-") for arg in args_for_source_check)
 
                         if is_purge_only:
-                            post(f"ℹ️ Purge operation for '{collection_name}' complete. No sources specified for ingestion.")
-                            _post_combined() # Post messages
-                            return # End of run_inject for purge-only
+                            _send_message_to_mattermost(f"ℹ️ Purge operation for '{collection_name}' complete. No sources specified for further ingestion.")
+                            return
 
-                    # Prepare arguments for ingest_llamaindex.py
-                    # Start with base command and collection name
                     ingest_cmd_base = [sys.executable, "-u", "-m", "ingest_llamaindex", "--collection-name", collection_name]
-                    
-                    # Filter raw_args_from_text for ingest_llamaindex, removing processed/unsupported flags
                     ingest_passthrough_args = []
                     potential_sources_from_args = []
-                    
-                    # Remove --purge and collection args from further processing for ingest_llamaindex
                     args_to_filter_for_ingest = [arg for arg in raw_args_from_text if arg != "--purge" and arg not in temp_collection_args]
 
                     for arg in args_to_filter_for_ingest:
-                        if arg == "--rich-metadata": # Default is ON for ingest_llamaindex
-                            continue 
-                        elif arg == "--no-rich-metadata": # Pass this through
-                            ingest_passthrough_args.append(arg)
-                        # Filter out old, unsupported flags
-                        elif arg in ("--generate-summaries", "--no-generate-summaries", 
-                                     "--quality-checks", "--no-quality-checks",
-                                     "--crawl-depth", "--depth-crawl", "--parallel"):
-                            post(f"ℹ️ Flag '{arg}' is no longer supported with ingest_llamaindex and will be ignored.")
-                        elif not arg.startswith("-"): # Assume it's a source if not a flag
-                            potential_sources_from_args.append(arg)
-                        else: # It's a flag we want to pass through (e.g., --chunk-size, --fast-chunking)
-                            ingest_passthrough_args.append(arg)
+                        if arg == "--rich-metadata": continue
+                        elif arg == "--no-rich-metadata": ingest_passthrough_args.append(arg)
+                        elif arg in ("--generate-summaries", "--no-generate-summaries", "--quality-checks", "--no-quality-checks", "--crawl-depth", "--depth-crawl", "--parallel"):
+                            _send_message_to_mattermost(f"ℹ️ Flag '{arg}' is no longer supported and will be ignored.")
+                        elif not arg.startswith("-"): potential_sources_from_args.append(arg)
+                        else: ingest_passthrough_args.append(arg)
                     
                     ingest_cmd_base.extend(ingest_passthrough_args)
-
-                    # Determine final sources to process
                     final_sources_to_process = []
                     temp_files_to_clean = []
 
                     if potential_sources_from_args:
                         final_sources_to_process = potential_sources_from_args
-                    else: # No explicit sources, fetch channel transcript
+                    else:
                         if not mattermost_url or not channel_id:
-                            post("❌ MATTERMOST_URL or channel_id not configured – unable to fetch channel messages.")
-                            _post_combined()
+                            _send_message_to_mattermost("❌ MATTERMOST_URL or channel_id not configured – unable to fetch channel messages for ingestion.")
                             return
-                        post("ℹ️ No source provided. Fetching current channel transcript for ingestion...")
-                        # (Mattermost message fetching logic - same as before)
+                        _send_message_to_mattermost("ℹ️ No source explicitly provided. Fetching current channel transcript for ingestion...")
                         msgs = []
                         hdrs = {"Authorization": f"Bearer {mattermost_token}"} if mattermost_token else {}
                         per_page = 200
                         page = 0
+                        channel_fetch_ok = True
                         while True:
-                            resp_ct = requests.get(
-                                f"{mattermost_url}/api/v4/channels/{channel_id}/posts",
-                                params={"page": page, "per_page": per_page}, headers=hdrs,
-                            )
-                            if resp_ct.status_code != 200:
-                                post(f"❌ Error fetching posts: {resp_ct.status_code} {resp_ct.text}")
-                                _post_combined(); return
+                            try:
+                                resp_ct = requests.get(
+                                    f"{mattermost_url}/api/v4/channels/{channel_id}/posts",
+                                    params={"page": page, "per_page": per_page}, headers=hdrs, timeout=15
+                                )
+                                resp_ct.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                            except requests.exceptions.RequestException as e_fetch:
+                                app.logger.error(f"Error fetching posts from Mattermost: {e_fetch}\n{traceback.format_exc()}")
+                                _send_message_to_mattermost(f"❌ Error fetching channel history: {e_fetch}. Check server logs.")
+                                channel_fetch_ok = False
+                                break
+                            
                             data_ct = resp_ct.json()
-                            posts = data_ct.get("posts", {})
+                            posts_data = data_ct.get("posts", {})
                             order = data_ct.get("order", [])
                             if not order: break
                             for pid in order:
-                                p = posts.get(pid)
+                                p = posts_data.get(pid)
                                 if p and p.get("message"): msgs.append(p["message"])
                             if len(order) < per_page: break
                             page += 1
                         
+                        if not channel_fetch_ok: return
                         if not msgs:
-                            post("No messages to ingest – channel is empty.")
-                            _post_combined(); return
+                            _send_message_to_mattermost("ℹ️ No messages found in the current channel to ingest.")
+                            return
                         
-                        tmp_file = tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False)
-                        tmp_file.write("\n".join(m.rstrip("\n") for m in msgs))
-                        tmp_file.close()
-                        final_sources_to_process = [tmp_file.name]
-                        temp_files_to_clean.append(tmp_file.name)
+                        try:
+                            tmp_file = tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False)
+                            tmp_file.write("\n".join(m.rstrip("\n") for m in msgs))
+                            tmp_file.close()
+                            final_sources_to_process = [tmp_file.name]
+                            temp_files_to_clean.append(tmp_file.name)
+                            _send_message_to_mattermost(f"ℹ️ Fetched {len(msgs)} messages from channel for ingestion.")
+                        except IOError as e_io:
+                            app.logger.error(f"Failed to write channel transcript to temp file: {e_io}\n{traceback.format_exc()}")
+                            _send_message_to_mattermost("❌ Error preparing channel transcript for ingestion. Check server logs.")
+                            return
+
 
                     if not final_sources_to_process:
-                        post("No sources to process for ingestion.")
-                        _post_combined(); return
+                        _send_message_to_mattermost("ℹ️ No sources to process for ingestion.")
+                        return
 
-                    # Process each source with ingest_llamaindex.py
+                    all_sources_successful = True
                     for src_idx, source_item in enumerate(final_sources_to_process):
-                        post(f"🚀 Starting ingestion for source ({src_idx+1}/{len(final_sources_to_process)}): {source_item}")
+                        _send_message_to_mattermost(f"🚀 Starting ingestion for source ({src_idx+1}/{len(final_sources_to_process)}): `{source_item}`")
                         
-                        current_ingest_cmd_for_source = list(ingest_cmd_base) # Start with base command (python -m ingest_llamaindex --collection-name ...)
-
-                        # Determine if source_item is a URL or a local path (for temp file)
-                        # The ingest_llamaindex.py script expects --source-url for URLs
-                        # and --data-dir for local directories.
-                        
+                        current_ingest_cmd_for_source = list(ingest_cmd_base)
                         is_url = source_item.startswith("http://") or source_item.startswith("https://")
                         
                         if is_url:
                             current_ingest_cmd_for_source.extend(["--source-url", source_item])
-                        else: # It's a local path (e.g., path to a temp file from channel transcript)
-                              # ingest_llamaindex.py --data-dir expects a directory.
-                              # If source_item is a file, we need to pass its parent directory.
+                        else:
                             source_file_path = Path(source_item)
                             if source_file_path.is_file():
                                 current_ingest_cmd_for_source.extend(["--data-dir", str(source_file_path.parent)])
-                            else: # If it's already a directory (less likely for this flow but handle)
+                            else:
                                 current_ingest_cmd_for_source.extend(["--data-dir", source_item])
                         
-                        # Add verbose flag if server is in debug mode or always for now
-                        if "--verbose" not in current_ingest_cmd_for_source: # Avoid duplicates
-                             current_ingest_cmd_for_source.append("--verbose")
+                        if "--verbose" not in current_ingest_cmd_for_source and app.debug:
+                             current_ingest_cmd_for_source.append("--verbose") # Only add verbose if server is in debug
 
+                        app.logger.info(f"Executing for source '{source_item}': {' '.join(shlex.quote(str(s)) for s in current_ingest_cmd_for_source)}")
+                        # _send_message_to_mattermost(f"⚙️ Processing source: `{source_item}`...") # Redundant with "Starting ingestion..."
 
-                        post(f"Executing: {' '.join(shlex.quote(str(s)) for s in current_ingest_cmd_for_source)}")
                         try:
                             env = dict(os.environ, PYTHONUNBUFFERED="1")
+                            # Use Popen to allow non-blocking logging if ingest_llamaindex is very verbose in debug
                             proc = subprocess.Popen(current_ingest_cmd_for_source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+                            
+                            # Log subprocess output to server logs, not directly to Mattermost for conciseness
                             if proc.stdout:
                                 for line in proc.stdout:
-                                    post(line.rstrip())
+                                    app.logger.info(f"[ingest_llamaindex:{source_item}] {line.rstrip()}")
+                            
                             ret = proc.wait()
                             if ret != 0:
-                                post(f"❌ Ingestion subprocess for '{source_item}' exited with code {ret}")
+                                _send_message_to_mattermost(f"❌ Error processing source `{source_item}` (exit code: {ret}). Check server logs for details.")
+                                all_sources_successful = False
                             else:
-                                post(f"✅ Successfully processed source: {source_item}")
+                                _send_message_to_mattermost(f"✅ Successfully processed source: `{source_item}`")
                         except Exception as e_proc:
-                            post(f"❌ Failed to start ingestion subprocess for '{source_item}': {e_proc}")
-                            import traceback
-                            post(traceback.format_exc())
-                            continue
+                            app.logger.error(f"Failed to start/run ingestion subprocess for '{source_item}': {e_proc}\n{traceback.format_exc()}")
+                            _send_message_to_mattermost(f"❌ Critical error during processing of source `{source_item}`. Check server logs.")
+                            all_sources_successful = False
+                            continue # Try next source if possible
                     
-                    # Cleanup temp files
                     for tf_path in temp_files_to_clean:
                         try:
                             os.remove(tf_path)
-                            post(f"🧹 Cleaned up temporary file: {tf_path}")
-                        except OSError:
-                            post(f"⚠️ Failed to clean up temporary file: {tf_path}")
-                                
-                except BaseException as e_outer:
-                    post(f"❌ An unexpected error occurred during the inject process: {e_outer}")
-                    import traceback
-                    post(traceback.format_exc()) 
-                finally:
-                    _post_combined() # Ensure all buffered messages are sent
+                            app.logger.info(f"Cleaned up temporary file: {tf_path}")
+                        except OSError as e_clean:
+                            app.logger.warning(f"Failed to clean up temporary file '{tf_path}': {e_clean}")
+                    
+                    if all_sources_successful and final_sources_to_process:
+                        _send_message_to_mattermost("✅ Ingestion process completed successfully for all sources.")
+                    elif final_sources_to_process: # Some sources might have failed
+                        _send_message_to_mattermost("⚠️ Ingestion process finished, but some sources may have encountered errors. Check server logs and previous messages for details.")
+                    # If no sources were processed (e.g. purge only and it returned early), no final message here.
+
+                except Exception as e_outer: # Catch any unexpected errors in the main try block
+                    app.logger.error(f"An unexpected error occurred during the inject process: {e_outer}\n{traceback.format_exc()}")
+                    _send_message_to_mattermost("❌ An critical unexpected error occurred during the inject process. Please check server logs for details.")
+                # No 'finally' block needed as messages are sent immediately.
 
             # This was the old synchronous purge handling block, now integrated into run_inject
             # threading.Thread(target=run_inject, daemon=True).start()
