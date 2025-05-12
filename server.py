@@ -8,6 +8,7 @@ import openai # Added for OpenAI API
 import shlex # Already present, but good to note
 import sys # Added for print to stderr
 import datetime # Added for timestamps in Mattermost messages
+from config import RETRIEVAL_SIMILARITY_TOP_K, RETRIEVAL_MMR_LAMBDA, RETRIEVAL_RERANK_TOP_N, RETRIEVAL_USE_MMR
 
 # LlamaIndex imports for /ask
 from llama_index.core import (
@@ -359,11 +360,11 @@ def handle_slash():
                     raw_output_flag_val = os.environ.get("RETRIEVAL_RAW_OUTPUT", "False").lower() == "true"
                     use_hybrid_search_val = os.environ.get("RETRIEVAL_USE_HYBRID", "True").lower() == "true"
                     # sparse_top_k_val = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 10)) # Replaced by dynamic kwargs
-                    rerank_top_n_val = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 0)) # Default 0 (disabled)
+                    rerank_top_n_val = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", RETRIEVAL_RERANK_TOP_N))
                     reranker_model_val = os.environ.get("RETRIEVAL_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
                     
                     # Determine use_mmr_val: Default to True, allow --no-mmr to override.
-                    use_mmr_val = True # Default to ON
+                    use_mmr_val = os.environ.get("RETRIEVAL_USE_MMR", str(RETRIEVAL_USE_MMR)).lower() == "true"
                     original_query_text_param_for_logging = query_text_param # For logging
 
                     temp_query_parts = shlex.split(query_text_param)
@@ -390,7 +391,7 @@ def handle_slash():
                     # query_args_list should now be based on the potentially cleaned query_text_param
                     query_args_list = shlex.split(query_text_param)
                     
-                    mmr_lambda_val = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.8))
+                    mmr_lambda_val = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", RETRIEVAL_MMR_LAMBDA))
                     
                     # Filters: For now, not supporting dynamic filters from slash command in this integration.
                     # This could be added by parsing 'text' for filter arguments.
@@ -419,7 +420,11 @@ def handle_slash():
                         try:
                             query_kwargs['similarity_top_k'] = int(env_similarity_top_k)
                         except ValueError:
-                            print(f"[WARNING] Invalid RETRIEVAL_SIMILARITY_TOP_K: {env_similarity_top_k}. query_llamaindex.py default will be used.", file=sys.stderr)
+                            print(f"[WARNING] Invalid RETRIEVAL_SIMILARITY_TOP_K: {env_similarity_top_k}. Using default value: {RETRIEVAL_SIMILARITY_TOP_K}", file=sys.stderr)
+                            query_kwargs['similarity_top_k'] = RETRIEVAL_SIMILARITY_TOP_K
+                    else:
+                        # Use the imported config value as default
+                        query_kwargs['similarity_top_k'] = RETRIEVAL_SIMILARITY_TOP_K
 
                     env_sparse_top_k = os.environ.get("RETRIEVAL_SPARSE_TOP_K")
                     if env_sparse_top_k is not None:

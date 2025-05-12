@@ -16,8 +16,8 @@ DEFAULT_VECTOR_SIZE = int(os.environ.get("DEFAULT_VECTOR_SIZE", DEFAULT_VECTOR_S
 
 # --- LlamaIndex Configuration ---
 DEFAULT_PERSIST_DIR = "./storage_llamaindex_db"
-DEFAULT_CHUNK_SIZE = 2048
-DEFAULT_CHUNK_OVERLAP = 50
+DEFAULT_CHUNK_SIZE = 512
+DEFAULT_CHUNK_OVERLAP = 128
 
 # --- Server Specific Configuration (can be expanded) ---
 MATTERMOST_URL = os.environ.get("MATTERMOST_URL")
@@ -29,13 +29,13 @@ SERVER_HOST = os.environ.get("HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("PORT", "5000"))
 
 # --- Retrieval Configuration (defaults from query_llamaindex.py) ---
-RETRIEVAL_SIMILARITY_TOP_K = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 10))
+RETRIEVAL_SIMILARITY_TOP_K = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 30))
 RETRIEVAL_SPARSE_TOP_K = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 10))
-RETRIEVAL_RERANK_TOP_N = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 0)) # 0 to disable
+RETRIEVAL_RERANK_TOP_N = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 50)) # 0 to disable
 RETRIEVAL_RERANKER_MODEL = os.environ.get("RETRIEVAL_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RETRIEVAL_USE_HYBRID = os.environ.get("RETRIEVAL_USE_HYBRID", "True").lower() == "true"
-RETRIEVAL_USE_MMR = os.environ.get("RETRIEVAL_USE_MMR", "False").lower() == "true"
-RETRIEVAL_MMR_LAMBDA = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.5))
+RETRIEVAL_USE_MMR = os.environ.get("RETRIEVAL_USE_MMR", "True").lower() == "true"
+RETRIEVAL_MMR_LAMBDA = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.7))
 RETRIEVAL_USE_QUERY_EXPANSION = os.environ.get("RETRIEVAL_USE_QUERY_EXPANSION", "True").lower() == "true"
 RETRIEVAL_MAX_EXPANSIONS = int(os.environ.get("RETRIEVAL_MAX_EXPANSIONS", 3))
 RETRIEVAL_COMPRESS_CONTEXT = os.environ.get("RETRIEVAL_COMPRESS_CONTEXT", "False").lower() == "true"
