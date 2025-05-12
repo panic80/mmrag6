@@ -417,14 +417,14 @@ def handle_slash():
                     env_similarity_top_k = os.environ.get("RETRIEVAL_SIMILARITY_TOP_K")
                     if env_similarity_top_k is not None:
                         try:
-                            query_kwargs['similarity_top_k'] = int(env_similarity_top_k)
+                            query_kwargs['similarity_top_k'] = 20 # Default value
                         except ValueError:
                             print(f"[WARNING] Invalid RETRIEVAL_SIMILARITY_TOP_K: {env_similarity_top_k}. query_llamaindex.py default will be used.", file=sys.stderr)
 
                     env_sparse_top_k = os.environ.get("RETRIEVAL_SPARSE_TOP_K")
                     if env_sparse_top_k is not None:
                         try:
-                            query_kwargs['sparse_top_k'] = int(env_sparse_top_k)
+                            query_kwargs['sparse_top_k'] = 10
                         except ValueError:
                             print(f"[WARNING] Invalid RETRIEVAL_SPARSE_TOP_K: {env_sparse_top_k}. query_llamaindex.py default will be used.", file=sys.stderr)
                     

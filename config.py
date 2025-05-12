@@ -16,8 +16,8 @@ DEFAULT_VECTOR_SIZE = int(os.environ.get("DEFAULT_VECTOR_SIZE", DEFAULT_VECTOR_S
 
 # --- LlamaIndex Configuration ---
 DEFAULT_PERSIST_DIR = "./storage_llamaindex_db"
-DEFAULT_CHUNK_SIZE = 2048
-DEFAULT_CHUNK_OVERLAP = 50
+DEFAULT_CHUNK_SIZE = 512
+DEFAULT_CHUNK_OVERLAP = 128
 
 # --- Server Specific Configuration (can be expanded) ---
 MATTERMOST_URL = os.environ.get("MATTERMOST_URL")
