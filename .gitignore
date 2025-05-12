@@ -1,2 +1,4 @@
 .env
 **/.claude/settings.local.json
+
+storage_llamaindex_db/
