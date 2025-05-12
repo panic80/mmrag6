@@ -375,7 +375,7 @@ def handle_slash():
                             use_mmr_val = False
                             explicit_mmr_setting_found = True
                         elif part == "--mmr": # Explicitly asking for MMR
-                            use_mmr_val = True # Reinforce, though it's already default
+                            use_mmr_val = True
                             explicit_mmr_setting_found = True
                         else:
                             cleaned_query_parts.append(part)
@@ -384,9 +384,10 @@ def handle_slash():
                         query_text_param = " ".join(cleaned_query_parts)
                         app.logger.info(f"Explicit MMR flag found. Setting use_mmr to {use_mmr_val}. Cleaned query: '{query_text_param}'")
                     else:
-                        # No explicit flag, use_mmr_val remains True (our hardcoded default)
-                        app.logger.info(f"No explicit MMR flag. Defaulting use_mmr to {use_mmr_val}.")
-                    
+                        # No explicit flag, use default from config
+                        use_mmr_val = False
+                        app.logger.info(f"No explicit MMR flag. Using default from config: use_mmr = {use_mmr_val}")
+
                     # query_args_list should now be based on the potentially cleaned query_text_param
                     query_args_list = shlex.split(query_text_param)
                     
