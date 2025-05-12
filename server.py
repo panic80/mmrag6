@@ -205,6 +205,14 @@ def handle_slash():
                     # Determine persist path for the local docstore
                     persist_dir_base = Path("./storage_llamaindex_db")
                     local_docstore_persist_path = persist_dir_base / collection_name_param
+                    
+                    # Log storage paths for debugging
+                    app.logger.info(f"[storage] Base persist directory: {persist_dir_base}")
+                    app.logger.info(f"[storage] Full docstore path: {local_docstore_persist_path}")
+                    app.logger.info(f"[storage] Directory exists: {local_docstore_persist_path.exists()}")
+                    app.logger.info(f"[storage] Is directory: {local_docstore_persist_path.is_dir() if local_docstore_persist_path.exists() else 'N/A'}")
+                    if local_docstore_persist_path.exists():
+                        app.logger.info(f"[storage] Contents: {list(local_docstore_persist_path.iterdir())}")
 
                     # Initialize Qdrant client
                     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -241,17 +249,45 @@ def handle_slash():
                     loaded_storage_context: StorageContext
                     if local_docstore_persist_path.exists() and local_docstore_persist_path.is_dir():
                         docstore_json_file = local_docstore_persist_path / "docstore.json"
+                        docstore_valid = False
+                        
                         if docstore_json_file.exists():
-                            app.logger.info(f"Local docstore found at {str(local_docstore_persist_path)}. Loading StorageContext.")
-                            loaded_storage_context = StorageContext.from_defaults(
-                                vector_store=vector_store, # Provide Qdrant vector store
-                                persist_dir=str(local_docstore_persist_path)
-                            )
+                            # Validate docstore.json content
+                            import json
+                            try:
+                                with open(docstore_json_file) as f:
+                                    docstore_content = json.load(f)
+                                if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
+                                    app.logger.warning(f"[warning] docstore.json exists but appears empty or has no documents at {docstore_json_file}")
+                                    app.logger.warning(f"[debug] docstore content: {docstore_content}")
+                                else:
+                                    app.logger.info(f"[success] Valid docstore found at {docstore_json_file} with {len(docstore_content.get('docstore', {}).get('docs', {}))} documents")
+                                    docstore_valid = True
+                            except json.JSONDecodeError as e:
+                                app.logger.error(f"[error] Invalid JSON in docstore at {docstore_json_file}: {e}")
+                            except Exception as e:
+                                app.logger.error(f"[error] Failed to read docstore at {docstore_json_file}: {e}")
                         else:
-                            app.logger.warning(f"Local docstore.json not found in {str(local_docstore_persist_path)}. Proceeding with Qdrant vector store only for StorageContext.")
-                            loaded_storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                            app.logger.warning(f"Local docstore.json not found in {str(local_docstore_persist_path)}.")
+                        
+                        # Load storage context with vector store and possibly docstore
+                        app.logger.info(f"Loading StorageContext from {str(local_docstore_persist_path)}.")
+                        loaded_storage_context = StorageContext.from_defaults(
+                            vector_store=vector_store,
+                            persist_dir=str(local_docstore_persist_path)
+                        )
+                        
+                        # Check if docstore is empty after loading
+                        if not docstore_valid and hasattr(loaded_storage_context, 'docstore') and not loaded_storage_context.docstore.docs:
+                            app.logger.warning(f"[warning] Loaded StorageContext but docstore is empty. Will attempt to populate from vector store.")
                     else:
-                        app.logger.warning(f"Local docstore path {str(local_docstore_persist_path)} not found. Proceeding with Qdrant vector store only for StorageContext.")
+                        app.logger.warning(f"Local docstore path {str(local_docstore_persist_path)} not found. Creating directory.")
+                        try:
+                            os.makedirs(local_docstore_persist_path, exist_ok=True)
+                            app.logger.info(f"Created directory: {local_docstore_persist_path}")
+                        except Exception as e_mkdir:
+                            app.logger.error(f"[error] Failed to create directory {local_docstore_persist_path}: {e_mkdir}")
+                        
                         loaded_storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
                     # Load the index using the Qdrant vector store
@@ -259,6 +295,33 @@ def handle_slash():
                         vector_store=vector_store,
                         storage_context=loaded_storage_context # This context now includes Qdrant VS and potentially local docstore
                     )
+                    
+                    # Check if docstore is empty and try to populate it from the vector store
+                    if hasattr(loaded_storage_context, 'docstore') and not loaded_storage_context.docstore.docs:
+                        app.logger.warning("[warning] Docstore is empty. Attempting to populate from vector store nodes...")
+                        
+                        try:
+                            # Try to get nodes from the index
+                            if hasattr(index, '_all_nodes_dict') and index._all_nodes_dict:
+                                app.logger.info(f"[info] Found {len(index._all_nodes_dict)} nodes in index. Populating docstore...")
+                                for node_id, node in index._all_nodes_dict.items():
+                                    if not loaded_storage_context.docstore.document_exists(node_id):
+                                        loaded_storage_context.docstore.add_documents([node], allow_update=True)
+                                
+                                # Persist the populated docstore
+                                if loaded_storage_context.docstore.docs:
+                                    app.logger.info(f"[success] Populated docstore with {len(loaded_storage_context.docstore.docs)} nodes from index.")
+                                    try:
+                                        loaded_storage_context.persist(persist_dir=str(local_docstore_persist_path))
+                                        app.logger.info(f"[success] Persisted populated docstore to {local_docstore_persist_path}")
+                                    except Exception as e_persist:
+                                        app.logger.error(f"[error] Failed to persist populated docstore: {e_persist}")
+                                else:
+                                    app.logger.warning("[warning] Failed to populate docstore from index nodes.")
+                            else:
+                                app.logger.warning("[warning] No nodes found in index to populate docstore.")
+                        except Exception as e_populate:
+                            app.logger.error(f"[error] Error while attempting to populate docstore: {e_populate}")
                     
                     # Instead of building the query engine here, we will call the main_async
                     # function from query_llamaindex.py.
@@ -327,7 +390,7 @@ def handle_slash():
                     # query_args_list should now be based on the potentially cleaned query_text_param
                     query_args_list = shlex.split(query_text_param)
                     
-                    mmr_lambda_val = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.5))
+                    mmr_lambda_val = float(os.environ.get("RETRIEVAL_MMR_LAMBDA", 0.8))
                     
                     # Filters: For now, not supporting dynamic filters from slash command in this integration.
                     # This could be added by parsing 'text' for filter arguments.

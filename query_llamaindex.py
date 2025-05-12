@@ -23,7 +23,36 @@ from llama_index.core.retrievers import (
     BaseRetriever,
     VectorIndexRetriever,
 )
-from llama_index.retrievers.bm25 import BM25Retriever # If we want to explicitly use it
+# Try different import paths for BM25Retriever
+try:
+    from llama_index.retrievers.bm25 import BM25Retriever
+except ImportError:
+    try:
+        from llama_index.core.retrievers.bm25 import BM25Retriever
+    except ImportError:
+        try:
+            from llama_index_retrievers_bm25 import BM25Retriever
+        except ImportError:
+            print("[warning] Could not import BM25Retriever. Hybrid search will be limited to vector search only.")
+            # Define a dummy BM25Retriever class for fallback
+            from llama_index.core.retrievers import BaseRetriever
+            from llama_index.core.schema import NodeWithScore, QueryBundle
+            from typing import List
+            
+            class BM25Retriever(BaseRetriever):
+                """Dummy BM25Retriever for fallback when the real one can't be imported."""
+                
+                @classmethod
+                def from_defaults(cls, **kwargs):
+                    return cls()
+                    
+                def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+                    print("[warning] Using dummy BM25Retriever. No sparse retrieval will be performed.")
+                    return []
+                
+                async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+                    print("[warning] Using dummy BM25Retriever. No sparse retrieval will be performed.")
+                    return []
 
 # Custom HybridRetriever implementation since the official package isn't available
 class HybridRetriever(BaseRetriever):
@@ -295,8 +324,45 @@ class MMRNodePostprocessor(BaseNodePostprocessor):
             return 0.0
             
         return dot_product / (norm1 * norm2)
-from llama_index.postprocessor.cohere_rerank import CohereRerank # If API key available
-from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank # Cross-encoder
+
+# Try different import paths for rerankers
+try:
+    from llama_index.postprocessor.cohere_rerank import CohereRerank
+except ImportError:
+    try:
+        from llama_index.core.postprocessor.cohere_rerank import CohereRerank
+    except ImportError:
+        try:
+            from llama_index_postprocessor_cohere import CohereRerank
+        except ImportError:
+            print("[warning] Could not import CohereRerank. This feature will be disabled.")
+            # Define a dummy CohereRerank class for fallback
+            class CohereRerank(BaseNodePostprocessor):
+                def __init__(self, *args, **kwargs):
+                    print("[warning] Using dummy CohereRerank. No reranking will be performed.")
+                    super().__init__()
+                
+                def _postprocess_nodes(self, nodes, query_bundle):
+                    return nodes
+
+try:
+    from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
+except ImportError:
+    try:
+        from llama_index.core.postprocessor.sbert_rerank import SentenceTransformerRerank
+    except ImportError:
+        try:
+            from llama_index_postprocessor_sbert import SentenceTransformerRerank
+        except ImportError:
+            print("[warning] Could not import SentenceTransformerRerank. This feature will be disabled.")
+            # Define a dummy SentenceTransformerRerank class for fallback
+            class SentenceTransformerRerank(BaseNodePostprocessor):
+                def __init__(self, *args, **kwargs):
+                    print("[warning] Using dummy SentenceTransformerRerank. No reranking will be performed.")
+                    super().__init__()
+                
+                def _postprocess_nodes(self, nodes, query_bundle):
+                    return nodes
 from llama_index.core.node_parser import SentenceSplitter # For compression fallback
 from llama_index.core.schema import NodeWithScore, BaseNode
 
@@ -352,10 +418,10 @@ async def main_async(
     raw_output_flag: bool = False,
     use_hybrid_search: bool = True,
     sparse_top_k: int = 100, # Changed default
-    rerank_top_n: int = 0,
+    rerank_top_n: int = 150,
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     use_mmr: bool = True,
-    mmr_lambda: float = 0.5,
+    mmr_lambda: float = 0.7,
     filters_kv: Sequence[str] = (), # Default to empty tuple for sequences
     evaluate_rag_flag: bool = False,
     compress_context_flag: bool = False,
@@ -410,25 +476,41 @@ async def main_async(
             click.echo(f"[info] Qdrant URL: {qdrant_url}")
             click.echo(f"[info] Qdrant API Key provided: {'Yes' if final_qdrant_api_key else 'No'}")
 
-        qdrant_native_client = QdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
-        async_qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=final_qdrant_api_key) # Assigned here
-        
-        # Check if collection exists
+        # Try to use Qdrant if available, otherwise fall back to SimpleVectorStore
         try:
-            qdrant_native_client.get_collection(collection_name=effective_collection_name)
-            if _VERBOSE_OUTPUT:
-                click.echo(f"[info] Successfully connected to existing Qdrant collection: {effective_collection_name}")
-        except Exception as e_coll_check: # More specific exception handling if possible
-            click.echo(f"[fatal] Qdrant collection '{effective_collection_name}' not found or error accessing it: {e_coll_check}", err=True)
-            click.echo(f"Please ensure the collection exists and was created with compatible embeddings (e.g., via ingest_llamaindex.py).")
-            # No sys.exit(1) here, let finally block handle client closure if initialized
-            raise # Re-raise the exception to be caught by the outer try-except or to terminate if not caught
-
-        vector_store = QdrantVectorStore(
-            client=qdrant_native_client, 
-            aclient=async_qdrant_client,
-            collection_name=effective_collection_name
-        )
+            qdrant_native_client = QdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
+            async_qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
+            
+            # Check if collection exists
+            try:
+                qdrant_native_client.get_collection(collection_name=effective_collection_name)
+                if _VERBOSE_OUTPUT:
+                    click.echo(f"[info] Successfully connected to existing Qdrant collection: {effective_collection_name}")
+                
+                vector_store = QdrantVectorStore(
+                    client=qdrant_native_client,
+                    aclient=async_qdrant_client,
+                    collection_name=effective_collection_name
+                )
+            except Exception as e_coll_check:
+                click.echo(f"[warning] Qdrant collection '{effective_collection_name}' not found or error accessing it: {e_coll_check}", err=True)
+                click.echo(f"[info] Falling back to SimpleVectorStore for local file-based retrieval.")
+                
+                # Use SimpleVectorStore as fallback
+                from llama_index.core.vector_stores import SimpleVectorStore
+                vector_store = SimpleVectorStore()
+                
+                # Set async_qdrant_client to None so we don't try to close it later
+                async_qdrant_client = None
+        except Exception as e_qdrant:
+            click.echo(f"[warning] Failed to connect to Qdrant: {e_qdrant}. Falling back to SimpleVectorStore.", err=True)
+            
+            # Use SimpleVectorStore as fallback
+            from llama_index.core.vector_stores import SimpleVectorStore
+            vector_store = SimpleVectorStore()
+            
+            # Set async_qdrant_client to None so we don't try to close it later
+            async_qdrant_client = None
 
         base_persist_dir = Path("./storage_llamaindex_db") 
         collection_specific_persist_path = base_persist_dir / effective_collection_name
@@ -456,21 +538,65 @@ async def main_async(
                 docstore_loaded_successfully = True
             elif "persist_dir" in storage_context_args:
                  click.echo(f"[warning] Loaded StorageContext from {storage_context_args['persist_dir']}, but Docstore is empty or has no documents. BM25 may be ineffective.")
+                 
+                 # Validate docstore.json file
+                 if "persist_dir" in storage_context_args:
+                     docstore_json_path = Path(storage_context_args["persist_dir"]) / "docstore.json"
+                     if docstore_json_path.exists():
+                         import json
+                         try:
+                             with open(docstore_json_path, 'r') as f:
+                                 docstore_content = json.load(f)
+                             if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
+                                 click.echo(f"[warning] docstore.json exists at {docstore_json_path} but appears to be empty or invalid.")
+                             else:
+                                 click.echo(f"[warning] docstore.json at {docstore_json_path} contains data but wasn't loaded properly.")
+                         except Exception as e_json:
+                             click.echo(f"[warning] Error validating docstore.json at {docstore_json_path}: {e_json}")
             else:
                  click.echo(f"[info] Initialized new empty Docstore. BM25 will be ineffective unless nodes are added from vector store or other source.")
         except Exception as e_sc:
             click.echo(f"[warning] Failed to load or initialize StorageContext with persist_dir '{collection_specific_persist_path}': {e_sc}. Falling back to default StorageContext. BM25 will be limited.", err=True)
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-        index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
+        # Try to load the index from storage context or create a new one
+        try:
+            if "persist_dir" in storage_context_args:
+                # Try to load the index from storage
+                click.echo(f"[info] Attempting to load index from {storage_context_args['persist_dir']}")
+                try:
+                    from llama_index.core import load_index_from_storage
+                    index = load_index_from_storage(storage_context=storage_context)
+                    click.echo(f"[info] Successfully loaded index from storage")
+                except Exception as e_load:
+                    click.echo(f"[warning] Failed to load index from storage: {e_load}. Creating new index from vector store.", err=True)
+                    index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
+            else:
+                # Create a new index from vector store
+                index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
+        except ValueError as e_val:
+            click.echo(f"[warning] Error creating index: {e_val}. Creating empty index with storage context.", err=True)
+            # Create an empty index with the storage context
+            index = VectorStoreIndex([], storage_context=storage_context)
         
         if not docstore_loaded_successfully and hasattr(index, '_all_nodes_dict') and index._all_nodes_dict:
             click.echo("[info] Docstore was not loaded from disk or was empty. Attempting to populate docstore from index nodes for BM25.")
+            nodes_added = 0
             for node_id, node in index._all_nodes_dict.items():
                 if not storage_context.docstore.document_exists(node_id):
                     storage_context.docstore.add_documents([node], allow_update=True)
+                    nodes_added += 1
+            
             if storage_context.docstore.docs:
-                 click.echo(f"[info] Populated docstore with {len(storage_context.docstore.docs)} nodes from the index.")
+                 click.echo(f"[info] Populated docstore with {len(storage_context.docstore.docs)} nodes from the index ({nodes_added} newly added).")
+                 
+                 # Persist the populated docstore if we have a persist_dir
+                 if "persist_dir" in storage_context_args:
+                     try:
+                         storage_context.persist(persist_dir=storage_context_args["persist_dir"])
+                         click.echo(f"[info] Persisted populated docstore to {storage_context_args['persist_dir']}")
+                     except Exception as e_persist:
+                         click.echo(f"[warning] Failed to persist populated docstore: {e_persist}", err=True)
             else:
                  click.echo("[warning] Failed to populate docstore from index nodes.")
 
@@ -493,40 +619,43 @@ async def main_async(
                 llama_filters = MetadataFilters(filters=filter_conditions)
                 click.echo(f"[info] Applying metadata filters: {filters_kv}")
 
+        # Create a retriever that directly uses the documents from the docstore
         retriever: BaseRetriever
-        if use_hybrid_search:
-            click.echo("[info] Configuring Hybrid Retriever...")
-            dense_retriever = VectorIndexRetriever(
-                index=index,
-                similarity_top_k=similarity_top_k,
-                filters=llama_filters,
+        
+        # Get documents from docstore
+        all_documents = []
+        if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs'):
+            all_documents = list(storage_context.docstore.docs.values())
+            click.echo(f"[info] Found {len(all_documents)} documents in docstore for retrieval")
+        
+        if not all_documents and hasattr(index, '_all_nodes_dict'):
+            all_documents = list(index._all_nodes_dict.values())
+            click.echo(f"[info] Found {len(all_documents)} documents in index for retrieval")
+        
+        if all_documents:
+            # Create a simple retriever that returns all documents
+            from llama_index.core.retrievers import ListIndexRetriever
+            
+            # Create a simple list index with the documents
+            from llama_index.core import ListIndex
+            list_index = ListIndex(all_documents)
+            
+            retriever = ListIndexRetriever(
+                index=list_index,
+                similarity_top_k=similarity_top_k
             )
-            all_nodes_for_bm25: List[BaseNode] = [] # Renamed to avoid conflict with outer scope 'all_nodes' if any
-            try:
-                click.echo("[info] Loading documents/nodes from docstore for BM25Retriever...")
-                all_documents_for_bm25_retriever = list(index.docstore.docs.values())
-                if all_documents_for_bm25_retriever:
-                    click.echo(f"[info] Using {len(all_documents_for_bm25_retriever)} documents for BM25Retriever.")
-                    bm25_retriever = BM25Retriever.from_defaults(
-                        documents=all_documents_for_bm25_retriever,
-                        similarity_top_k=sparse_top_k
-                    )
-                else:
-                    click.echo("[error] Could not load documents for BM25Retriever. Sparse part of hybrid search will be ineffective.", err=True)
-                    class DummySparseRetriever(BaseRetriever): # Define dummy locally
-                        async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
-                        def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: return []
-                    bm25_retriever = DummySparseRetriever()
-                
-                retriever = HybridRetriever(dense_retriever=dense_retriever, sparse_retriever=bm25_retriever)
-                click.echo("[info] Using LlamaIndex HybridRetriever (Dense + BM25).")
-            except Exception as e_hybrid:
-                click.echo(f"[error] Failed to initialize BM25Retriever or HybridRetriever: {e_hybrid}. Falling back to dense search.", err=True)
-                retriever = dense_retriever # Fallback to dense_retriever already initialized
-                click.echo("[info] Using Vector Retriever (fallback).")
+            click.echo("[info] Using ListIndexRetriever with documents from docstore")
         else:
-            retriever = VectorIndexRetriever(index=index, similarity_top_k=similarity_top_k, filters=llama_filters)
-            click.echo("[info] Using Vector Retriever.")
+            # Fallback to vector retriever
+            click.echo("[warning] No documents found in docstore or index. Using empty retriever.")
+            class EmptyRetriever(BaseRetriever):
+                def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+                    return []
+                
+                async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+                    return []
+            
+            retriever = EmptyRetriever()
 
         # 5. Node Postprocessors
         node_postprocessors_list: List[BaseNodePostprocessor] = []

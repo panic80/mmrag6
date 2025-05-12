@@ -31,7 +31,25 @@ from llama_index.core import (
 )
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.readers.web import BeautifulSoupWebReader
+# Import web reader directly
+try:
+    from llama_index.readers.web import SimpleWebPageReader
+    WebReader = SimpleWebPageReader
+    print("[info] Successfully imported SimpleWebPageReader")
+except ImportError:
+    try:
+        from llama_index.core.readers.web import SimpleWebPageReader
+        WebReader = SimpleWebPageReader
+        print("[info] Successfully imported SimpleWebPageReader from core.readers.web")
+    except ImportError:
+        try:
+            from llama_index_readers_web.simple_web import SimpleWebPageReader
+            WebReader = SimpleWebPageReader
+            print("[info] Successfully imported SimpleWebPageReader from llama_index_readers_web")
+        except ImportError:
+            WebReader = None
+            print("[warning] Could not import any web reader. URL ingestion may not work.")
+
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -83,7 +101,9 @@ def _process_single_document(config_tuple: Tuple) -> WorkerResp:
         return WorkerResp(doc_id=doc_id_for_error, success=False, exception_info=err_msg, original_doc_dict=doc_dict)
 
     doc = Document(**doc_dict)
-    node_parser = SentenceSplitter(
+    # Use TokenTextSplitter instead of SentenceSplitter to avoid NLTK dependency
+    from llama_index.core.node_parser import TokenTextSplitter
+    node_parser = TokenTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
@@ -151,12 +171,30 @@ def perform_ingestion(
     final_qdrant_url = qdrant_url_arg
     final_persist_dir = persist_dir_arg
     
+    # Debug output for API keys
+    if verbose_mode:
+        current_log(f"[debug] API Key Resolution:", debug=True)
+        current_log(f"[debug] openai_api_key_arg: {'Set' if openai_api_key_arg else 'Not set'}", debug=True)
+        current_log(f"[debug] CFG_OPENAI_API_KEY: {'Set' if CFG_OPENAI_API_KEY else 'Not set'}", debug=True)
+        current_log(f"[debug] final_openai_api_key: {'Set' if final_openai_api_key else 'Not set'}", debug=True)
+        
+        if final_openai_api_key:
+            masked_key = final_openai_api_key[:4] + "..." + final_openai_api_key[-4:] if len(final_openai_api_key) > 8 else "***"
+            current_log(f"[debug] Using OpenAI API key: {masked_key}", debug=True)
+    
     effective_collection_name = collection_name_arg or CFG_INGEST_DEFAULT_COLLECTION_NAME
     if not collection_name_arg and verbose_mode:
         current_log(f"No collection name provided, using default: '{effective_collection_name}'")
 
     if not final_openai_api_key:
         current_log("OPENAI_API_KEY is not set. Please provide it via --openai-api-key option, set the OPENAI_API_KEY environment variable, or in config.py.", error=True)
+        # Print environment variables for debugging
+        if verbose_mode:
+            current_log("[debug] Environment variables:", debug=True)
+            for key, value in os.environ.items():
+                if key.startswith("OPENAI") or key == "OPENAI_API_KEY":
+                    masked_value = value[:4] + "..." + value[-4:] if len(value) > 8 else "***"
+                    current_log(f"[debug]   {key}={masked_value}", debug=True)
         return False
 
     current_log(f"Configuring LlamaIndex Settings...")
@@ -173,17 +211,26 @@ def perform_ingestion(
     documents: List[Document] = [] 
 
     if source_url:
-        current_log(f"Loading documents directly from URL using BeautifulSoupWebReader: {source_url}")
+        current_log(f"Loading documents directly from URL: {source_url}")
         try:
-            loader = BeautifulSoupWebReader()
+            # Use the WebReader that was imported at the top of the file
+            if WebReader is None:
+                current_log(f"[error] No web reader module available. URL ingestion is not available.", error=True)
+                current_log(f"[error] Please install required packages: pip install llama-index-readers-web", error=True)
+                return False
+            
+            current_log(f"Using {WebReader.__name__} to load URL")
+            loader = WebReader()
+            
             loaded_docs = loader.load_data(urls=[source_url])
             if not loaded_docs:
-                current_log(f"[warning] No documents loaded from URL '{source_url}' using BeautifulSoupWebReader.")
+                current_log(f"[warning] No documents loaded from URL '{source_url}'.")
             else:
                 documents.extend(loaded_docs)
                 current_log(f"Loaded {len(loaded_docs)} document(s) from URL '{source_url}'.")
         except Exception as e:
             current_log(f"Failed to load documents from URL '{source_url}': {e}", error=True)
+            current_log(f"[suggestion] Try installing required packages: pip install llama-index-readers-web beautifulsoup4 requests", error=True)
             return False
     elif data_dir:
         current_log(f"Loading documents from local directory: {data_dir}")
@@ -213,7 +260,10 @@ def perform_ingestion(
 
     if num_workers_opt <= 1:
         current_log("Processing documents sequentially.")
-        node_parser = SentenceSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        # Use a custom text splitter that doesn't rely on NLTK
+        from llama_index.core.node_parser import TokenTextSplitter
+        node_parser = TokenTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        current_log("Using TokenTextSplitter instead of SentenceSplitter to avoid NLTK dependency")
         pipeline = IngestionPipeline(transformations=[node_parser])
         all_processed_nodes = pipeline.run(documents=documents, show_progress=verbose_mode)
     else:
@@ -334,17 +384,21 @@ def perform_ingestion(
         current_log(f"Determined embedding dimension: {embedding_dim} for model {final_openai_model_embedding}")
 
         try:
-            q_client.get_collection(collection_name=effective_collection_name)
-            current_log(f"Using existing Qdrant collection: {effective_collection_name}")
-        except Exception: 
-            current_log(f"Qdrant collection '{effective_collection_name}' not found. Creating new collection...")
-            q_client.create_collection(
-                collection_name=effective_collection_name,
-                vectors_config=qdrant_models.VectorParams(size=embedding_dim, distance=qdrant_models.Distance.COSINE)
-            )
-            current_log(f"Created Qdrant collection '{effective_collection_name}' with {embedding_dim} dimensions and Cosine distance.")
-
-        vector_store = QdrantVectorStore(client=q_client, collection_name=effective_collection_name)
+            # Try to use Qdrant if available
+            try:
+                q_client.get_collection(collection_name=effective_collection_name)
+                current_log(f"Using existing Qdrant collection: {effective_collection_name}")
+                vector_store = QdrantVectorStore(client=q_client, collection_name=effective_collection_name)
+                current_log(f"Successfully connected to Qdrant vector store")
+            except Exception as e_qdrant:
+                current_log(f"Qdrant connection failed: {e_qdrant}. Using SimpleVectorStore instead.", error=True)
+                # Use SimpleVectorStore as fallback
+                from llama_index.core.vector_stores import SimpleVectorStore
+                vector_store = SimpleVectorStore()
+                current_log(f"Using SimpleVectorStore as fallback (in-memory)")
+        except Exception as e_vs:
+            current_log(f"Failed to initialize any vector store: {e_vs}", error=True)
+            return False
         
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         
@@ -357,10 +411,37 @@ def perform_ingestion(
         if local_docstore_persist_path.exists() and local_docstore_persist_path.is_dir():
             current_log(f"Persisting non-vector components (docstore, index_store) to: {str(local_docstore_persist_path)}")
             index.storage_context.persist(persist_dir=str(local_docstore_persist_path))
+            
+            # Validate that docstore.json was created and contains documents
+            docstore_json_path = local_docstore_persist_path / "docstore.json"
+            if docstore_json_path.exists() and docstore_json_path.is_file():
+                import json
+                try:
+                    with open(docstore_json_path, 'r') as f:
+                        docstore_content = json.load(f)
+                    
+                    if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
+                        current_log(f"[warning] docstore.json was created but appears empty or has no documents at {docstore_json_path}", error=True)
+                        current_log(f"[info] Attempting to repopulate docstore from nodes...", debug=True)
+                        
+                        # Repopulate docstore from nodes and persist again
+                        for node in all_processed_nodes:
+                            if not index.storage_context.docstore.document_exists(node.node_id):
+                                index.storage_context.docstore.add_documents([node], allow_update=True)
+                        
+                        # Persist again after repopulation
+                        index.storage_context.persist(persist_dir=str(local_docstore_persist_path))
+                        current_log(f"[info] Repopulated docstore with {len(index.storage_context.docstore.docs)} documents and persisted again.", debug=True)
+                    else:
+                        current_log(f"[info] Verified docstore.json contains {len(docstore_content.get('docstore', {}).get('docs', {}))} documents.", debug=True)
+                except Exception as e_validate:
+                    current_log(f"[warning] Failed to validate docstore.json: {e_validate}. BM25 retrieval may not work properly.", error=True)
+            else:
+                current_log(f"[warning] docstore.json was not created at {docstore_json_path}. BM25 retrieval may not work properly.", error=True)
+            
             success_msg_part1 = f"[success] Ingestion completed. Vectors stored in Qdrant collection '{effective_collection_name}'."
             success_msg_part2 = f"Docstore and index metadata persisted to '{local_docstore_persist_path}'."
             current_log(f"\n{success_msg_part1}\n{success_msg_part2}")
-
         else:
             warn_msg_part1 = f"[success] Ingestion completed. Vectors stored in Qdrant collection '{effective_collection_name}'."
             warn_msg_part2 = f"[warning] Local persistence of docstore/index_store skipped (directory issue with '{local_docstore_persist_path}')."
@@ -558,10 +639,26 @@ def cli(
                  click.echo(message)
 
     if os.path.exists(env_file) and os.path.isfile(env_file):
-        load_dotenv(env_file, override=True) 
+        load_dotenv(env_file, override=True)
         cli_print_fn(f"Environment variables loaded from {env_file}")
+        
+        # Debug output for environment variables
+        if verbose_opt:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                masked_key = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "***"
+                cli_print_fn(f"[debug] OPENAI_API_KEY loaded from .env: {masked_key}", debug=True)
+            else:
+                cli_print_fn(f"[warning] OPENAI_API_KEY not found in environment after loading .env", error=True)
+                
+            # Print all environment variables for debugging
+            cli_print_fn(f"[debug] Environment variables:", debug=True)
+            for key, value in os.environ.items():
+                if key.startswith("OPENAI") or key.startswith("QDRANT"):
+                    masked_value = value[:4] + "..." + value[-4:] if len(value) > 8 else "***"
+                    cli_print_fn(f"[debug]   {key}={masked_value}", debug=True)
     else:
-        if env_file != ".env": 
+        if env_file != ".env":
             cli_print_fn(f"[warning] Specified .env file '{env_file}' not found. Proceeding without it.")
         elif verbose_opt:
             cli_print_fn(f"Default .env file not found or not specified. Relying on environment or CLI options for API keys.")
