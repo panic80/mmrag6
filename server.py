@@ -98,6 +98,8 @@ def handle_slash():
 
             # Asynchronous execution
             def run_and_post(query_text_param, collection_name_param): # Added parameters
+                # Track start time for response timing
+                start_time = datetime.datetime.now()
                 # Track whether REST calls are still worth trying for this request
                 rest_usable: dict[str, bool] = {"ok": bool(mattermost_url and mattermost_token and channel_id)}
                 answer_text = "An error occurred while processing your query." # Default error message
@@ -202,21 +204,9 @@ def handle_slash():
                         return
 
                     # Determine collection name (already passed as collection_name_param)
-                    # Determine persist path for the local docstore
-                    persist_dir_base = Path("./storage_llamaindex_db")
-                    local_docstore_persist_path = persist_dir_base / collection_name_param
-                    
-                    # Log storage paths for debugging
-                    app.logger.info(f"[storage] Base persist directory: {persist_dir_base}")
-                    app.logger.info(f"[storage] Full docstore path: {local_docstore_persist_path}")
-                    app.logger.info(f"[storage] Directory exists: {local_docstore_persist_path.exists()}")
-                    app.logger.info(f"[storage] Is directory: {local_docstore_persist_path.is_dir() if local_docstore_persist_path.exists() else 'N/A'}")
-                    if local_docstore_persist_path.exists():
-                        app.logger.info(f"[storage] Contents: {list(local_docstore_persist_path.iterdir())}")
-
-                    # Initialize Qdrant client
+                    # Initialize Qdrant client and vector store
                     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-                    qdrant_api_key_env = os.environ.get("QDRANT_API_KEY") # Use a different var to avoid conflict
+                    qdrant_api_key_env = os.environ.get("QDRANT_API_KEY")
                     
                     app.logger.info(f"Connecting to Qdrant at {qdrant_url} for collection {collection_name_param}")
 
@@ -239,89 +229,24 @@ def handle_slash():
                         _post_message(txt="⚠️ Data Access Error", attachments=[error_attachment])
                         return
 
+                    # Configure vector store to use full document content from Qdrant
                     vector_store = QdrantVectorStore(
                         client=q_client,
-                        collection_name=collection_name_param
+                        collection_name=collection_name_param,
+                        metadata_payload_key="metadata",
+                        content_payload_key="content",
+                        stores_text=True
                     )
                     
-                    # Attempt to load local docstore if it exists
-                    app.logger.info(f"Checking for local docstore at: {str(local_docstore_persist_path)}")
-                    loaded_storage_context: StorageContext
-                    if local_docstore_persist_path.exists() and local_docstore_persist_path.is_dir():
-                        docstore_json_file = local_docstore_persist_path / "docstore.json"
-                        docstore_valid = False
-                        
-                        if docstore_json_file.exists():
-                            # Validate docstore.json content
-                            import json
-                            try:
-                                with open(docstore_json_file) as f:
-                                    docstore_content = json.load(f)
-                                if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
-                                    app.logger.warning(f"[warning] docstore.json exists but appears empty or has no documents at {docstore_json_file}")
-                                    app.logger.warning(f"[debug] docstore content: {docstore_content}")
-                                else:
-                                    app.logger.info(f"[success] Valid docstore found at {docstore_json_file} with {len(docstore_content.get('docstore', {}).get('docs', {}))} documents")
-                                    docstore_valid = True
-                            except json.JSONDecodeError as e:
-                                app.logger.error(f"[error] Invalid JSON in docstore at {docstore_json_file}: {e}")
-                            except Exception as e:
-                                app.logger.error(f"[error] Failed to read docstore at {docstore_json_file}: {e}")
-                        else:
-                            app.logger.warning(f"Local docstore.json not found in {str(local_docstore_persist_path)}.")
-                        
-                        # Load storage context with vector store and possibly docstore
-                        app.logger.info(f"Loading StorageContext from {str(local_docstore_persist_path)}.")
-                        loaded_storage_context = StorageContext.from_defaults(
-                            vector_store=vector_store,
-                            persist_dir=str(local_docstore_persist_path)
-                        )
-                        
-                        # Check if docstore is empty after loading
-                        if not docstore_valid and hasattr(loaded_storage_context, 'docstore') and not loaded_storage_context.docstore.docs:
-                            app.logger.warning(f"[warning] Loaded StorageContext but docstore is empty. Will attempt to populate from vector store.")
-                    else:
-                        app.logger.warning(f"Local docstore path {str(local_docstore_persist_path)} not found. Creating directory.")
-                        try:
-                            os.makedirs(local_docstore_persist_path, exist_ok=True)
-                            app.logger.info(f"Created directory: {local_docstore_persist_path}")
-                        except Exception as e_mkdir:
-                            app.logger.error(f"[error] Failed to create directory {local_docstore_persist_path}: {e_mkdir}")
-                        
-                        loaded_storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                    # Create storage context with vector store only
+                    storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-                    # Load the index using the Qdrant vector store
+                    # Create index directly from vector store
                     index = VectorStoreIndex.from_vector_store(
                         vector_store=vector_store,
-                        storage_context=loaded_storage_context # This context now includes Qdrant VS and potentially local docstore
+                        storage_context=storage_context,
+                        store_nodes_override=True
                     )
-                    
-                    # Check if docstore is empty and try to populate it from the vector store
-                    if hasattr(loaded_storage_context, 'docstore') and not loaded_storage_context.docstore.docs:
-                        app.logger.warning("[warning] Docstore is empty. Attempting to populate from vector store nodes...")
-                        
-                        try:
-                            # Try to get nodes from the index
-                            if hasattr(index, '_all_nodes_dict') and index._all_nodes_dict:
-                                app.logger.info(f"[info] Found {len(index._all_nodes_dict)} nodes in index. Populating docstore...")
-                                for node_id, node in index._all_nodes_dict.items():
-                                    if not loaded_storage_context.docstore.document_exists(node_id):
-                                        loaded_storage_context.docstore.add_documents([node], allow_update=True)
-                                
-                                # Persist the populated docstore
-                                if loaded_storage_context.docstore.docs:
-                                    app.logger.info(f"[success] Populated docstore with {len(loaded_storage_context.docstore.docs)} nodes from index.")
-                                    try:
-                                        loaded_storage_context.persist(persist_dir=str(local_docstore_persist_path))
-                                        app.logger.info(f"[success] Persisted populated docstore to {local_docstore_persist_path}")
-                                    except Exception as e_persist:
-                                        app.logger.error(f"[error] Failed to persist populated docstore: {e_persist}")
-                                else:
-                                    app.logger.warning("[warning] Failed to populate docstore from index nodes.")
-                            else:
-                                app.logger.warning("[warning] No nodes found in index to populate docstore.")
-                        except Exception as e_populate:
-                            app.logger.error(f"[error] Error while attempting to populate docstore: {e_populate}")
                     
                     # Instead of building the query engine here, we will call the main_async
                     # function from query_llamaindex.py.
@@ -497,16 +422,169 @@ def handle_slash():
                     _post_message(txt=f"⚠️ Error during query for: {original_query_text_param_for_logging}", attachments=[error_attachment])
                     return # Exit after posting error
 
-                # Compose final message with attachments
+                # Helper function to format markdown tables for Mattermost
+                def format_ascii_table(data, headers=None):
+                    """
+                    Format data into a Mattermost-compatible markdown table.
+                    Handles alignment based on content type.
+                    """
+                    if not data:
+                        return ""
+                    
+                    # Convert all data to strings and determine alignments
+                    str_data = []
+                    alignments = []  # Track alignment for each column
+                    
+                    # Process headers if provided
+                    if headers:
+                        str_data.append([str(h).strip() for h in headers])
+                        # Initialize alignments based on header length
+                        alignments = ['left'] * len(headers)
+                    
+                    # Process data rows and determine alignments
+                    for row in data:
+                        str_row = []
+                        for i, cell in enumerate(row):
+                            cell_str = str(cell).strip()
+                            str_row.append(cell_str)
+                            
+                            # Extend alignments if needed
+                            while i >= len(alignments):
+                                alignments.append('left')
+                            
+                            # Set right alignment for numeric/financial data
+                            if cell_str.replace('$', '').replace(',', '').replace('.', '').replace('-', '').isdigit() or \
+                               cell_str.startswith('$') or cell_str.startswith('-$'):
+                                alignments[i] = 'right'
+                        
+                        str_data.append(str_row)
+                    
+                    # Build the markdown table
+                    table_lines = []
+                    
+                    # Add headers or create placeholder if none provided
+                    if not headers and str_data:
+                        headers = [''] * len(str_data[0])
+                        str_data.insert(0, headers)
+                    
+                    # Format header row
+                    table_lines.append('| ' + ' | '.join(str_data[0]) + ' |')
+                    
+                    # Add alignment row
+                    align_markers = []
+                    for align in alignments:
+                        if align == 'right':
+                            align_markers.append('---:')
+                        else:
+                            align_markers.append(':---')
+                    table_lines.append('| ' + ' | '.join(align_markers) + ' |')
+                    
+                    # Add data rows
+                    for row in str_data[1:]:
+                        # Ensure row has enough cells
+                        while len(row) < len(alignments):
+                            row.append('')
+                        table_lines.append('| ' + ' | '.join(row) + ' |')
+                    
+                    return '\n'.join(table_lines)
+
+                # Helper function to detect response type and get appropriate color
+                def get_response_type_and_color(text):
+                    if "```" in text:  # Contains code blocks
+                        return "💻 Code Example", "#9C27B0"  # Purple for code
+                    if "|" in text and any(marker in text.lower() for marker in ["table", "| ---", "csv"]):
+                        return "📊 Data Analysis from RAG System", "#FF9800"  # Orange for data/tables
+                    if any(marker in text for marker in ["1.", "2.", "•", "-", "*"]):
+                        return "📝 List Response", "#2196F3"  # Blue for lists
+                    if any(marker in text for marker in ["> ", "quote"]):
+                        return "💭 Quote/Reference", "#795548"  # Brown for quotes
+                    return "💡 General Response", "#28A745"  # Green for general answers
+
+                # Process the response text
+                response_type, color = get_response_type_and_color(answer_text)
+                
+                # Format code blocks with syntax highlighting
+                formatted_text = answer_text
+                if "```" in formatted_text:
+                    # Add language hints for common code blocks
+                    formatted_text = formatted_text.replace("```python", "```Python")
+                    formatted_text = formatted_text.replace("```javascript", "```JavaScript")
+                    formatted_text = formatted_text.replace("```java", "```Java")
+
+                # Process tables in the response
+                if "|" in formatted_text:
+                    # Split text into blocks (separated by double newlines)
+                    blocks = formatted_text.split('\n\n')
+                    formatted_blocks = []
+                    
+                    for block in blocks:
+                        if "|" in block and any(marker in block.lower() for marker in ["table", "| ---", "csv"]):
+                            # Extract table lines
+                            table_lines = [line.strip() for line in block.split('\n') if '|' in line]
+                            if len(table_lines) >= 2:  # Need at least header and one data row
+                                try:
+                                    # Parse the table data
+                                    headers = []
+                                    data = []
+                                    
+                                    # Process header row
+                                    header_line = table_lines[0]
+                                    headers = [cell.strip() for cell in header_line.strip('|').split('|')]
+                                    
+                                    # Skip alignment/separator row if present
+                                    start_idx = 2 if len(table_lines) > 2 and all('-' in cell for cell in table_lines[1].split('|')) else 1
+                                    
+                                    # Process data rows
+                                    for line in table_lines[start_idx:]:
+                                        if line.strip() and not all('-' in cell for cell in line.split('|')):
+                                            cells = [cell.strip() for cell in line.strip('|').split('|')]
+                                            # Ensure row has same number of cells as headers
+                                            while len(cells) < len(headers):
+                                                cells.append('')
+                                            data.append(cells[:len(headers)])  # Trim extra cells if any
+                                    
+                                    if headers and data:
+                                        # Format the table with our markdown table formatter
+                                        formatted_table = format_ascii_table(data, headers)
+                                        formatted_blocks.append(formatted_table)
+                                    else:
+                                        formatted_blocks.append(block)
+                                except Exception as e:
+                                    app.logger.warning(f"Table formatting failed: {e}")
+                                    formatted_blocks.append(block)
+                            else:
+                                formatted_blocks.append(block)
+                        else:
+                            formatted_blocks.append(block)
+                    
+                    # Rejoin blocks with double newlines
+                    formatted_text = '\n\n'.join(formatted_blocks)
+
+                # Calculate response time
+                response_time = datetime.datetime.now() - start_time
+                
+                # Format as Mattermost markdown with a header and footer
+                formatted_text = f"""#### 📊 Data Analysis from RAG System
+
+{formatted_text}
+
+---
+*Model: {openai_model_llm_val} | Response Time: {response_time.total_seconds():.2f}s*"""
+
+                # Compose enhanced message with attachments
                 answer_attachment = {
-                    "color": "#28A745", # Green for success
-                    "author_name": "RAG System",
+                    "color": "#FF9800",  # Orange sidebar for data analysis
+                    "author_name": "📊 Data Analysis from RAG System",
+                    "author_icon": "https://raw.githubusercontent.com/mattermost/mattermost/master/server/public/images/icon50x50.png",
                     "title": f"Re: {original_query_text_param_for_logging}",
-                    "text": answer_text if answer_text else "No answer could be generated.",
-                    "footer": f"Powered by LlamaIndex & OpenAI ({openai_model_llm_val})", # Use llm_model_name from earlier
+                    "text": formatted_text if formatted_text else "No answer could be generated.",
+                    "footer": "Powered by LlamaIndex & OpenAI",
+                    "footer_icon": "https://raw.githubusercontent.com/run-llama/llama_index/main/docs/_static/llama_index_icon.png",
                     "ts": datetime.datetime.now().timestamp()
                 }
-                _post_message(txt=f"**Q:** {original_query_text_param_for_logging}", attachments=[answer_attachment])
+
+                # Add horizontal rule before the response
+                _post_message(txt=f"**Q:** {original_query_text_param_for_logging}\n\n---", attachments=[answer_attachment])
 
 
             # Always run asynchronously

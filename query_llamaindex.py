@@ -512,93 +512,17 @@ async def main_async(
             # Set async_qdrant_client to None so we don't try to close it later
             async_qdrant_client = None
 
-        base_persist_dir = Path("./storage_llamaindex_db") 
-        collection_specific_persist_path = base_persist_dir / effective_collection_name
+        # Initialize storage context with vector store only
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
         
-        if _VERBOSE_OUTPUT:
-            click.echo(f"[info] Checking for local docstore at: {str(collection_specific_persist_path)}")
-        
-        storage_context_args = {"vector_store": vector_store}
-        docstore_loaded_successfully = False
-
-        if collection_specific_persist_path.exists() and collection_specific_persist_path.is_dir():
-            docstore_json_path = collection_specific_persist_path / "docstore.json"
-            if docstore_json_path.exists() and docstore_json_path.is_file():
-                click.echo(f"[info] Found docstore.json at {docstore_json_path}. Will attempt to load StorageContext from: {str(collection_specific_persist_path)}")
-                storage_context_args["persist_dir"] = str(collection_specific_persist_path)
-            else:
-                click.echo(f"[warning] Local docstore.json not found in '{str(collection_specific_persist_path)}'. BM25 may be limited if docstore is not loaded.", err=True)
-        else:
-            click.echo(f"[warning] Local persistence directory '{str(collection_specific_persist_path)}' not found. BM25 will be limited if docstore is not loaded.", err=True)
-
-        try:
-            storage_context = StorageContext.from_defaults(**storage_context_args)
-            if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs') and storage_context.docstore.docs:
-                click.echo(f"[info] Successfully loaded/initialized Docstore with {len(storage_context.docstore.docs)} documents.")
-                docstore_loaded_successfully = True
-            elif "persist_dir" in storage_context_args:
-                 click.echo(f"[warning] Loaded StorageContext from {storage_context_args['persist_dir']}, but Docstore is empty or has no documents. BM25 may be ineffective.")
-                 
-                 # Validate docstore.json file
-                 if "persist_dir" in storage_context_args:
-                     docstore_json_path = Path(storage_context_args["persist_dir"]) / "docstore.json"
-                     if docstore_json_path.exists():
-                         import json
-                         try:
-                             with open(docstore_json_path, 'r') as f:
-                                 docstore_content = json.load(f)
-                             if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
-                                 click.echo(f"[warning] docstore.json exists at {docstore_json_path} but appears to be empty or invalid.")
-                             else:
-                                 click.echo(f"[warning] docstore.json at {docstore_json_path} contains data but wasn't loaded properly.")
-                         except Exception as e_json:
-                             click.echo(f"[warning] Error validating docstore.json at {docstore_json_path}: {e_json}")
-            else:
-                 click.echo(f"[info] Initialized new empty Docstore. BM25 will be ineffective unless nodes are added from vector store or other source.")
-        except Exception as e_sc:
-            click.echo(f"[warning] Failed to load or initialize StorageContext with persist_dir '{collection_specific_persist_path}': {e_sc}. Falling back to default StorageContext. BM25 will be limited.", err=True)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-        # Try to load the index from storage context or create a new one
-        try:
-            if "persist_dir" in storage_context_args:
-                # Try to load the index from storage
-                click.echo(f"[info] Attempting to load index from {storage_context_args['persist_dir']}")
-                try:
-                    from llama_index.core import load_index_from_storage
-                    index = load_index_from_storage(storage_context=storage_context)
-                    click.echo(f"[info] Successfully loaded index from storage")
-                except Exception as e_load:
-                    click.echo(f"[warning] Failed to load index from storage: {e_load}. Creating new index from vector store.", err=True)
-                    index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
-            else:
-                # Create a new index from vector store
-                index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
-        except ValueError as e_val:
-            click.echo(f"[warning] Error creating index: {e_val}. Creating empty index with storage context.", err=True)
-            # Create an empty index with the storage context
-            index = VectorStoreIndex([], storage_context=storage_context)
-        
-        if not docstore_loaded_successfully and hasattr(index, '_all_nodes_dict') and index._all_nodes_dict:
-            click.echo("[info] Docstore was not loaded from disk or was empty. Attempting to populate docstore from index nodes for BM25.")
-            nodes_added = 0
-            for node_id, node in index._all_nodes_dict.items():
-                if not storage_context.docstore.document_exists(node_id):
-                    storage_context.docstore.add_documents([node], allow_update=True)
-                    nodes_added += 1
-            
-            if storage_context.docstore.docs:
-                 click.echo(f"[info] Populated docstore with {len(storage_context.docstore.docs)} nodes from the index ({nodes_added} newly added).")
-                 
-                 # Persist the populated docstore if we have a persist_dir
-                 if "persist_dir" in storage_context_args:
-                     try:
-                         storage_context.persist(persist_dir=storage_context_args["persist_dir"])
-                         click.echo(f"[info] Persisted populated docstore to {storage_context_args['persist_dir']}")
-                     except Exception as e_persist:
-                         click.echo(f"[warning] Failed to persist populated docstore: {e_persist}", err=True)
-            else:
-                 click.echo("[warning] Failed to populate docstore from index nodes.")
+        # Create index directly from vector store
+        click.echo("[info] Creating index from Qdrant vector store...")
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            storage_context=storage_context,
+            store_nodes_override=True  # Ensure nodes are stored in vector store
+        )
+        click.echo(f"[info] Successfully initialized index from Qdrant collection '{effective_collection_name}'")
 
         # 3. Query Expansion
         full_query_text = " ".join(query_text)
@@ -619,43 +543,13 @@ async def main_async(
                 llama_filters = MetadataFilters(filters=filter_conditions)
                 click.echo(f"[info] Applying metadata filters: {filters_kv}")
 
-        # Create a retriever that directly uses the documents from the docstore
-        retriever: BaseRetriever
-        
-        # Get documents from docstore
-        all_documents = []
-        if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs'):
-            all_documents = list(storage_context.docstore.docs.values())
-            click.echo(f"[info] Found {len(all_documents)} documents in docstore for retrieval")
-        
-        if not all_documents and hasattr(index, '_all_nodes_dict'):
-            all_documents = list(index._all_nodes_dict.values())
-            click.echo(f"[info] Found {len(all_documents)} documents in index for retrieval")
-        
-        if all_documents:
-            # Create a simple retriever that returns all documents
-            from llama_index.core.retrievers import ListIndexRetriever
-            
-            # Create a simple list index with the documents
-            from llama_index.core import ListIndex
-            list_index = ListIndex(all_documents)
-            
-            retriever = ListIndexRetriever(
-                index=list_index,
-                similarity_top_k=similarity_top_k
-            )
-            click.echo("[info] Using ListIndexRetriever with documents from docstore")
-        else:
-            # Fallback to vector retriever
-            click.echo("[warning] No documents found in docstore or index. Using empty retriever.")
-            class EmptyRetriever(BaseRetriever):
-                def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    return []
-                
-                async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    return []
-            
-            retriever = EmptyRetriever()
+        # Create vector retriever that gets documents directly from Qdrant
+        retriever = VectorIndexRetriever(
+            index=index,
+            similarity_top_k=similarity_top_k,
+            filters=llama_filters
+        )
+        click.echo(f"[info] Using VectorIndexRetriever with similarity_top_k={similarity_top_k}")
 
         # 5. Node Postprocessors
         node_postprocessors_list: List[BaseNodePostprocessor] = []

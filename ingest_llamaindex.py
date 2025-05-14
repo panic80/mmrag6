@@ -388,8 +388,15 @@ def perform_ingestion(
             try:
                 q_client.get_collection(collection_name=effective_collection_name)
                 current_log(f"Using existing Qdrant collection: {effective_collection_name}")
-                vector_store = QdrantVectorStore(client=q_client, collection_name=effective_collection_name)
-                current_log(f"Successfully connected to Qdrant vector store")
+                # Configure Qdrant to store full document content in payload
+                vector_store = QdrantVectorStore(
+                    client=q_client,
+                    collection_name=effective_collection_name,
+                    metadata_payload_key="metadata",
+                    content_payload_key="content",
+                    stores_text=True  # Enable storing full text content
+                )
+                current_log(f"Successfully connected to Qdrant vector store (with full document storage)")
             except Exception as e_qdrant:
                 current_log(f"Qdrant connection failed: {e_qdrant}. Using SimpleVectorStore instead.", error=True)
                 # Use SimpleVectorStore as fallback
@@ -400,52 +407,19 @@ def perform_ingestion(
             current_log(f"Failed to initialize any vector store: {e_vs}", error=True)
             return False
         
+        # Create storage context with vector store only
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         
+        # Build index and store nodes with full content in Qdrant
         index = VectorStoreIndex(
             nodes=all_processed_nodes,
             storage_context=storage_context,
             show_progress=verbose_mode,
+            store_nodes_override=True  # Ensure nodes are stored in vector store
         )
         
-        if local_docstore_persist_path.exists() and local_docstore_persist_path.is_dir():
-            current_log(f"Persisting non-vector components (docstore, index_store) to: {str(local_docstore_persist_path)}")
-            index.storage_context.persist(persist_dir=str(local_docstore_persist_path))
-            
-            # Validate that docstore.json was created and contains documents
-            docstore_json_path = local_docstore_persist_path / "docstore.json"
-            if docstore_json_path.exists() and docstore_json_path.is_file():
-                import json
-                try:
-                    with open(docstore_json_path, 'r') as f:
-                        docstore_content = json.load(f)
-                    
-                    if not docstore_content or not docstore_content.get("docstore", {}).get("docs"):
-                        current_log(f"[warning] docstore.json was created but appears empty or has no documents at {docstore_json_path}", error=True)
-                        current_log(f"[info] Attempting to repopulate docstore from nodes...", debug=True)
-                        
-                        # Repopulate docstore from nodes and persist again
-                        for node in all_processed_nodes:
-                            if not index.storage_context.docstore.document_exists(node.node_id):
-                                index.storage_context.docstore.add_documents([node], allow_update=True)
-                        
-                        # Persist again after repopulation
-                        index.storage_context.persist(persist_dir=str(local_docstore_persist_path))
-                        current_log(f"[info] Repopulated docstore with {len(index.storage_context.docstore.docs)} documents and persisted again.", debug=True)
-                    else:
-                        current_log(f"[info] Verified docstore.json contains {len(docstore_content.get('docstore', {}).get('docs', {}))} documents.", debug=True)
-                except Exception as e_validate:
-                    current_log(f"[warning] Failed to validate docstore.json: {e_validate}. BM25 retrieval may not work properly.", error=True)
-            else:
-                current_log(f"[warning] docstore.json was not created at {docstore_json_path}. BM25 retrieval may not work properly.", error=True)
-            
-            success_msg_part1 = f"[success] Ingestion completed. Vectors stored in Qdrant collection '{effective_collection_name}'."
-            success_msg_part2 = f"Docstore and index metadata persisted to '{local_docstore_persist_path}'."
-            current_log(f"\n{success_msg_part1}\n{success_msg_part2}")
-        else:
-            warn_msg_part1 = f"[success] Ingestion completed. Vectors stored in Qdrant collection '{effective_collection_name}'."
-            warn_msg_part2 = f"[warning] Local persistence of docstore/index_store skipped (directory issue with '{local_docstore_persist_path}')."
-            current_log(f"\n{warn_msg_part1}\n{warn_msg_part2}")
+        success_msg = f"[success] Ingestion completed. Documents stored in Qdrant collection '{effective_collection_name}' with full content."
+        current_log(f"\n{success_msg}")
         return True
 
     except Exception as e:
