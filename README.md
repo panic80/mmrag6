@@ -39,8 +39,8 @@
 *   Python (3.9+ recommended)
 *   Docker and Docker Compose
 *   An active OpenAI API key
-*   Access to a Qdrant instance (can be run locally via Docker Compose or a remote instance)
-*   A Mattermost instance configured for slash command integration
+*   A **mandatory and accessible** Qdrant instance (version 1.7.x or compatible). Qdrant is essential for storing and retrieving document embeddings. The system will not operate with an in-memory fallback.
+*   A Mattermost instance configured for slash command integration.
 
 ## Setup and Configuration
 
@@ -66,10 +66,10 @@
     *   `SLASH_TOKEN_INJECT`: (Optional) Specific token for the `/inject` command. Overrides `SLASH_TOKEN` if set.
     *   `SLASH_TOKEN_ASK`: (Optional) Specific token for the `/ask` command. Overrides `SLASH_TOKEN` if set.
     *   `MATTERMOST_URL`: **Required.** Your Mattermost server URL (e.g., `https://your.mattermost.server.com`).
-    *   `MATTERMOST_TOKEN`: **Required.** A Mattermost Personal Access Token with permissions to post messages. Used for asynchronous replies and threaded updates.
+    *   `MATTERMOST_TOKEN`: **Required.** A Mattermost Personal Access Token with permissions to post messages. This token is crucial for all asynchronous message delivery from `/ask` and `/inject` via the Mattermost REST API. If API calls using this token fail, messages will not be delivered, and errors will be logged on the server. The system does not use `response_url` as a fallback.
     *   `OPENAI_MODEL_LLM`: (Optional) OpenAI model for language generation (defaults to `gpt-4.1-mini`).
-    *   `OPENAI_MODEL_EMBEDDING`: (Optional) OpenAI model for text embeddings (defaults to `text-embedding-3-large`).
-    *   `DEFAULT_VECTOR_SIZE`: (Optional) Vector size for new Qdrant collections if created by the system (defaults to `3072`, matching `text-embedding-3-large`).
+    *   `OPENAI_MODEL_EMBEDDING`: (Optional) OpenAI model for text embeddings (defaults to `text-embedding-3-large`). Ensure `config.py`'s `get_embedding_dim` function supports your chosen model, or ingestion will fail.
+    *   `DEFAULT_VECTOR_SIZE`: (Optional) Vector size for new Qdrant collections if created by the system (defaults to `3072`, matching `text-embedding-3-large`). This is determined by `get_embedding_dim` in `config.py` based on the embedding model.
     *   `RETRIEVAL_SIMILARITY_TOP_K`: (Optional) Number of top similar documents to retrieve initially.
     *   `RETRIEVAL_USE_HYBRID`: (Optional) Set to `True` or `False` to enable/disable hybrid search (default is `True`).
     *   `RETRIEVAL_SPARSE_TOP_K`: (Optional) Number of top documents for sparse retrieval in hybrid search.
@@ -142,15 +142,23 @@
 ## Project Structure Overview
 
 *   `server.py`: The main Flask application; handles incoming Mattermost slash command requests and orchestrates ingestion/querying.
-*   `ingest_llamaindex.py`: Python script containing the core logic for data ingestion, processing, and storage into Qdrant.
-*   `query_llamaindex.py`: Python script that handles the RAG querying process, including retrieval, synthesis, and interfacing with OpenAI.
-*   `requirements.txt`: A list of Python package dependencies for the project.
+*   `ingest_llamaindex.py`: Python script containing the core logic for data ingestion, processing, and storage into Qdrant. It requires a functional Qdrant instance; it will not fall back to an in-memory store.
+*   `query_llamaindex.py`: Python script that handles the RAG querying process, including retrieval, synthesis, and interfacing with OpenAI. This script also strictly requires Qdrant for querying.
+*   `requirements.txt`: A list of Python package dependencies for the project. Some features depend on packages not included in the base `requirements.txt` (e.g., specific rerankers, web readers).
 *   `Dockerfile`: Instructions for building the Docker image for the `MMRag` application.
 *   `docker-compose.yml`: Docker Compose configuration to run the `MMRag` application and dependent services (like Qdrant) together.
-*   `storage_llamaindex_db/`: Default local directory where LlamaIndex might store document metadata or local components of the index if not solely relying on Qdrant for all parts.
+*   `storage_llamaindex_db/`: Default local directory where LlamaIndex stores document metadata (docstore) and index store information. Qdrant is used exclusively for vector storage.
+
+## Important Considerations & Error Handling
+
+*   **Qdrant is Mandatory**: Both ingestion (`/inject`) and querying (`/ask`) operations strictly require a running and accessible Qdrant instance configured via `QDRANT_URL`. If Qdrant is unavailable or the specified collection cannot be accessed/created, operations will fail with logged errors.
+*   **Missing Python Packages for Features**:
+    *   **URL Ingestion**: To use `/inject <URL>`, you must have `llama-index-readers-web` (which provides `SimpleWebPageReader`) and its dependencies (like `beautifulsoup4`) installed. If these are missing, attempting URL ingestion will result in a Python error (e.g., `ImportError` or `NameError`) and the request will fail. The `server.py` script's `check_url_dependencies()` function only prints warnings at startup for some related packages (`langchain-community`, etc.) but does not prevent runtime errors if `SimpleWebPageReader` itself is unavailable.
+    *   **Advanced Retrieval Components**: The querying script (`query_llamaindex.py`) may be configured to use components like `BM25Retriever`, `CohereRerank`, or `SentenceTransformerRerank`. If the Python packages for these components (e.g., `llama-index-retrievers-bm25`, `llama-index-postprocessor-cohere`, `llama-index-postprocessor-sbert-rerank`) are not installed, any attempt to use them will lead to an `ImportError`, causing the `/ask` request to fail.
+*   **Mattermost API Communication**: All asynchronous messages and updates to Mattermost (e.g., from `/ask` responses, `/inject` progress) are sent via the Mattermost REST API using the `MATTERMOST_TOKEN`. If these API calls fail (e.g., invalid token, network issues), errors will be logged on the server, and messages will not be delivered. There is no fallback to using `response_url` for these posts.
+*   **OpenAI Model Configuration**: Ensure that the embedding model specified (e.g., `OPENAI_MODEL_EMBEDDING`) is recognized by the `get_embedding_dim` function in `config.py`. If an unknown model is used, `ingest_llamaindex.py` will fail during vector store initialization due to a `ValueError`.
 
 ## Development Notes
 
-*   The `server.py` script includes a `check_url_dependencies()` function that verifies if optional packages for URL handling (`langchain-community`, `langchain`, `unstructured`, `bs4`) are installed. These are needed for the `/inject <URL>` functionality.
-*   Logging is configured within the Flask application. Check server logs for detailed information and troubleshooting.
-*   When running with Docker Compose, ensure the Qdrant service is healthy and accessible to the application service.
+*   Logging is configured within the Flask application. Check server logs for detailed information and troubleshooting, especially for issues related to Qdrant connectivity, missing packages, or Mattermost API errors.
+*   When running with Docker Compose, ensure the Qdrant service is healthy and accessible to the application service as per its configuration in `docker-compose.yml` and the application's environment variables.

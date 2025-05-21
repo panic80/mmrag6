@@ -23,36 +23,9 @@ from llama_index.core.retrievers import (
     BaseRetriever,
     VectorIndexRetriever,
 )
-# Try different import paths for BM25Retriever
-try:
-    from llama_index.retrievers.bm25 import BM25Retriever
-except ImportError:
-    try:
-        from llama_index.core.retrievers.bm25 import BM25Retriever
-    except ImportError:
-        try:
-            from llama_index_retrievers_bm25 import BM25Retriever
-        except ImportError:
-            print("[warning] Could not import BM25Retriever. Hybrid search will be limited to vector search only.")
-            # Define a dummy BM25Retriever class for fallback
-            from llama_index.core.retrievers import BaseRetriever
-            from llama_index.core.schema import NodeWithScore, QueryBundle
-            from typing import List
-            
-            class BM25Retriever(BaseRetriever):
-                """Dummy BM25Retriever for fallback when the real one can't be imported."""
-                
-                @classmethod
-                def from_defaults(cls, **kwargs):
-                    return cls()
-                    
-                def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    print("[warning] Using dummy BM25Retriever. No sparse retrieval will be performed.")
-                    return []
-                
-                async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    print("[warning] Using dummy BM25Retriever. No sparse retrieval will be performed.")
-                    return []
+# Try different import paths for BM25Retriever - Fallbacks removed
+from llama_index.retrievers.bm25 import BM25Retriever
+
 
 # Custom HybridRetriever implementation since the official package isn't available
 class HybridRetriever(BaseRetriever):
@@ -325,44 +298,10 @@ class MMRNodePostprocessor(BaseNodePostprocessor):
             
         return dot_product / (norm1 * norm2)
 
-# Try different import paths for rerankers
-try:
-    from llama_index.postprocessor.cohere_rerank import CohereRerank
-except ImportError:
-    try:
-        from llama_index.core.postprocessor.cohere_rerank import CohereRerank
-    except ImportError:
-        try:
-            from llama_index_postprocessor_cohere import CohereRerank
-        except ImportError:
-            print("[warning] Could not import CohereRerank. This feature will be disabled.")
-            # Define a dummy CohereRerank class for fallback
-            class CohereRerank(BaseNodePostprocessor):
-                def __init__(self, *args, **kwargs):
-                    print("[warning] Using dummy CohereRerank. No reranking will be performed.")
-                    super().__init__()
-                
-                def _postprocess_nodes(self, nodes, query_bundle):
-                    return nodes
+# Try different import paths for rerankers - Fallbacks removed
+from llama_index.postprocessor.cohere_rerank import CohereRerank
+from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
 
-try:
-    from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
-except ImportError:
-    try:
-        from llama_index.core.postprocessor.sbert_rerank import SentenceTransformerRerank
-    except ImportError:
-        try:
-            from llama_index_postprocessor_sbert import SentenceTransformerRerank
-        except ImportError:
-            print("[warning] Could not import SentenceTransformerRerank. This feature will be disabled.")
-            # Define a dummy SentenceTransformerRerank class for fallback
-            class SentenceTransformerRerank(BaseNodePostprocessor):
-                def __init__(self, *args, **kwargs):
-                    print("[warning] Using dummy SentenceTransformerRerank. No reranking will be performed.")
-                    super().__init__()
-                
-                def _postprocess_nodes(self, nodes, query_bundle):
-                    return nodes
 from llama_index.core.node_parser import SentenceSplitter # For compression fallback
 from llama_index.core.schema import NodeWithScore, BaseNode
 
@@ -476,41 +415,38 @@ async def main_async(
             click.echo(f"[info] Qdrant URL: {qdrant_url}")
             click.echo(f"[info] Qdrant API Key provided: {'Yes' if final_qdrant_api_key else 'No'}")
 
-        # Try to use Qdrant if available, otherwise fall back to SimpleVectorStore
+        # Initialize Qdrant Client and VectorStore - Fallback to SimpleVectorStore removed
         try:
             qdrant_native_client = QdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
             async_qdrant_client = AsyncQdrantClient(url=qdrant_url, api_key=final_qdrant_api_key)
             
             # Check if collection exists
-            try:
-                qdrant_native_client.get_collection(collection_name=effective_collection_name)
-                if _VERBOSE_OUTPUT:
-                    click.echo(f"[info] Successfully connected to existing Qdrant collection: {effective_collection_name}")
-                
-                vector_store = QdrantVectorStore(
-                    client=qdrant_native_client,
-                    aclient=async_qdrant_client,
-                    collection_name=effective_collection_name
-                )
-            except Exception as e_coll_check:
-                click.echo(f"[warning] Qdrant collection '{effective_collection_name}' not found or error accessing it: {e_coll_check}", err=True)
-                click.echo(f"[info] Falling back to SimpleVectorStore for local file-based retrieval.")
-                
-                # Use SimpleVectorStore as fallback
-                from llama_index.core.vector_stores import SimpleVectorStore
-                vector_store = SimpleVectorStore()
-                
-                # Set async_qdrant_client to None so we don't try to close it later
-                async_qdrant_client = None
+            qdrant_native_client.get_collection(collection_name=effective_collection_name)
+            if _VERBOSE_OUTPUT:
+                click.echo(f"[info] Successfully connected to existing Qdrant collection: {effective_collection_name}")
+            
+            vector_store = QdrantVectorStore(
+                client=qdrant_native_client,
+                aclient=async_qdrant_client,
+                collection_name=effective_collection_name
+            )
         except Exception as e_qdrant:
-            click.echo(f"[warning] Failed to connect to Qdrant: {e_qdrant}. Falling back to SimpleVectorStore.", err=True)
-            
-            # Use SimpleVectorStore as fallback
-            from llama_index.core.vector_stores import SimpleVectorStore
-            vector_store = SimpleVectorStore()
-            
-            # Set async_qdrant_client to None so we don't try to close it later
-            async_qdrant_client = None
+            click.echo(f"[fatal] Failed to connect to Qdrant or access collection '{effective_collection_name}': {e_qdrant}", err=True)
+            # Ensure async_qdrant_client is None if initialization failed before it was set
+            if 'async_qdrant_client' in locals() and async_qdrant_client:
+                 # Attempt to close if it was somehow initialized partially
+                try:
+                    # Create a new event loop for closing if one isn't running
+                    import asyncio
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    loop.run_until_complete(async_qdrant_client.close())
+                except Exception as e_close:
+                    click.echo(f"[warning] Exception during async_qdrant_client.close() after error: {e_close}", err=True)
+            sys.exit(1) # Exit if Qdrant connection fails
 
         base_persist_dir = Path("./storage_llamaindex_db") 
         collection_specific_persist_path = base_persist_dir / effective_collection_name
