@@ -128,26 +128,29 @@ def handle_slash():
                             if resp.status_code in (401, 403):
                                 rest_usable["ok"] = False
                             app.logger.warning(
-                                "Posting via REST API failed with %s – falling back to response_url",
+                                "Posting via REST API failed with status code: %s. No fallback configured.",
                                 resp.status_code,
                             )
                         except Exception:
                             rest_usable["ok"] = False
-                            app.logger.exception("REST API post failed – falling back to response_url")
+                            app.logger.exception("REST API post failed.")
+                            # Fallback to response_url removed. If REST fails, message is not sent.
+                            return # Explicitly return after logging the failure.
 
-                    if response_url:
-                        response_payload = {"response_type": "in_channel", "text": txt}
-                        if attachments: # Mattermost supports attachments in the initial response_url post
-                            response_payload["props"] = {"attachments": attachments}
-                        try:
-                            requests.post(
-                                response_url,
-                                json=response_payload,
-                                timeout=10,
-                            )
-                            return
-                        except Exception:
-                            app.logger.exception("Failed to post via response_url")
+                    # The following block for response_url fallback is now removed.
+                    # if response_url:
+                    #     response_payload = {"response_type": "in_channel", "text": txt}
+                    #     if attachments: # Mattermost supports attachments in the initial response_url post
+                    #         response_payload["props"] = {"attachments": attachments}
+                    #     try:
+                    #         requests.post(
+                    #             response_url,
+                    #             json=response_payload,
+                    #             timeout=10,
+                    #         )
+                    #         return
+                    #     except Exception:
+                    #         app.logger.exception("Failed to post via response_url")
                 
                 try:
                     openai_api_key = os.environ.get("OPENAI_API_KEY")
@@ -596,38 +599,53 @@ def handle_slash():
                                 return
                             if resp.status_code in (401, 403):
                                 rest_usable["ok"] = False
-                                app.logger.warning("Mattermost REST API auth failed (401/403). Falling back to response_url for subsequent messages.")
+                                app.logger.warning("Mattermost REST API auth failed (401/403). No fallback configured for subsequent messages.")
                             else:
                                 app.logger.warning(
-                                    "Mattermost REST API post failed with status %s: %s. Falling back to response_url.",
+                                    "Mattermost REST API post failed with status %s: %s. No fallback configured.",
                                     resp.status_code, resp.text
                                 )
+                                # If REST call failed due to status code, log and return.
+                                return # Explicitly return after logging.
                         except requests.exceptions.RequestException as e_req:
                             rest_usable["ok"] = False
-                            app.logger.exception(f"Mattermost REST API request failed: {e_req}. Falling back to response_url.")
+                            app.logger.exception(f"Mattermost REST API request failed: {e_req}.")
+                            # If REST call failed due to exception, log and return.
+                            return # Explicitly return after logging.
                     
-                    if response_url:
-                        # Fallback for response_url: threading and complex follow-up attachments are less reliable.
-                        # Send as new message if REST failed.
-                        fallback_payload = {"response_type": "in_channel", "text": message_text}
-                        if is_first_message and attachments: # Try to send attachments for the very first message
-                            fallback_payload["props"] = {"attachments": attachments}
+                    # The following block for response_url fallback is now removed.
+                    # if response_url:
+                    #     # Fallback for response_url: threading and complex follow-up attachments are less reliable.
+                    #     # Send as new message if REST failed.
+                    #     fallback_payload = {"response_type": "in_channel", "text": message_text}
+                    #     if is_first_message and attachments: # Try to send attachments for the very first message
+                    #         fallback_payload["props"] = {"attachments": attachments}
                         
-                        # If it's a follow-up and REST failed, we can't reliably thread.
-                        # Prepend to indicate it's an update.
-                        if not is_first_message and not rest_usable["ok"] and current_thread_root_id:
-                             # Indicate it's part of an ongoing operation if threading failed
-                            fallback_payload["text"] = f"(Update for /inject) {message_text}"
+                    #     # If it's a follow-up and REST failed, we can't reliably thread.
+                    #     # Prepend to indicate it's an update.
+                    #     if not is_first_message and not rest_usable["ok"] and current_thread_root_id:
+                    #          # Indicate it's part of an ongoing operation if threading failed
+                    #         fallback_payload["text"] = f"(Update for /inject) {message_text}"
 
-                        try:
-                            requests.post(response_url, json=fallback_payload, timeout=10)
-                            if is_first_message: # If REST failed for the first message, response_url was used.
-                                app.logger.warning("First inject message sent via response_url; threading may not be available for follow-ups if REST remains down.")
-                            return
-                        except requests.exceptions.RequestException as e_resp_url:
-                            app.logger.exception(f"Failed to post to response_url: {e_resp_url}")
+                    #     try:
+                    #         requests.post(response_url, json=fallback_payload, timeout=10)
+                    #         if is_first_message: # If REST failed for the first message, response_url was used.
+                    #             app.logger.warning("First inject message sent via response_url; threading may not be available for follow-ups if REST remains down.")
+                    #         return
+                    #     except requests.exceptions.RequestException as e_resp_url:
+                    #         app.logger.exception(f"Failed to post to response_url: {e_resp_url}")
                     
-                    app.logger.error(f"Failed to send message to Mattermost by any method: {message_text}")
+                    # If rest_usable["ok"] is false, or if the code reaches here after a failed REST attempt,
+                    # it means the message could not be sent via the primary method.
+                    # Log this specific outcome.
+                    if not rest_usable["ok"]:
+                        app.logger.error(f"Failed to send message to Mattermost via REST API and no fallback is configured: {message_text}")
+                    else:
+                        # This case should ideally not be reached if the primary attempt failed and returned.
+                        # However, if it's reached and rest_usable is still ok, it implies some logic error.
+                        # For safety, log that the message was not sent by any method if it wasn't handled by REST success.
+                        app.logger.error(f"Message was not sent to Mattermost by any method (unexpected state): {message_text}")
+
 
                 # Main ingestion logic
                 try:

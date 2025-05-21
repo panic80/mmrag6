@@ -58,6 +58,10 @@ def get_embedding_dim(model_name: str) -> int:
         return DEFAULT_VECTOR_SIZE_EMBEDDING_SMALL
     elif "ada-002" in model_name: # Older model, but common
         return DEFAULT_VECTOR_SIZE_EMBEDDING_SMALL
-    # Fallback to a general default or raise an error
-    return DEFAULT_VECTOR_SIZE
+    else:
+        raise ValueError(
+            f"Unknown embedding dimension for model '{model_name}'. "
+            f"Please add this model to 'get_embedding_dim' in config.py "
+            f"or verify the model name."
+        )
 

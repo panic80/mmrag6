@@ -42,24 +42,17 @@ from llama_index.core import (
 )
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
-# Import web reader directly
+# Import web reader directly - Fallback removed
+# Attempt to import from the most likely new location first, then older paths.
 try:
-    from llama_index.readers.web import SimpleWebPageReader
-    WebReader = SimpleWebPageReader
-    # print("[info] Successfully imported SimpleWebPageReader") # Replaced by logger
+    from llama_index_readers_web import SimpleWebPageReader # Common new location in v0.10+
 except ImportError:
     try:
-        from llama_index.core.readers.web import SimpleWebPageReader
-        WebReader = SimpleWebPageReader
-        # print("[info] Successfully imported SimpleWebPageReader from core.readers.web") # Replaced by logger
+        from llama_index.readers.web import SimpleWebPageReader # Older path pre-llama-index-readers-web
     except ImportError:
-        try:
-            from llama_index_readers_web.simple_web import SimpleWebPageReader
-            WebReader = SimpleWebPageReader
-            # print("[info] Successfully imported SimpleWebPageReader from llama_index_readers_web") # Replaced by logger
-        except ImportError:
-            WebReader = None
-            # print("[warning] Could not import any web reader. URL ingestion may not work.") # Replaced by logger
+        from llama_index.core.readers.web import SimpleWebPageReader # Core path if it was there
+
+WebReader = SimpleWebPageReader # Alias after successful import
 
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
@@ -85,11 +78,9 @@ from config import (
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# Log initial import status for WebReader
-if WebReader:
-    logger.info(f"Successfully imported a web reader: {WebReader.__name__}")
-else:
-    logger.warning("Could not import any web reader. URL ingestion may not work.")
+# Log initial import status for WebReader - Warning for WebReader = None removed
+if WebReader: # WebReader should always be defined now, or an ImportError would have occurred
+    logger.info(f"Successfully imported web reader: {getattr(WebReader, '__name__', 'SimpleWebPageReader')}")
 
 
 @dataclasses.dataclass
@@ -373,14 +364,10 @@ def _load_source_documents(
     if source_url:
         logger.info(f"Loading documents directly from URL: {source_url}")
         try:
-            if WebReader is None:
-                logger.error("No web reader module available. URL ingestion is not available.")
-                logger.error("Please install required packages: pip install llama-index-readers-web")
-                return None
-            
-            logger.info(f"Using {WebReader.__name__} to load URL")
-            loader = WebReader()
-            
+            # WebReader should be imported by now, or an ImportError would have stopped the script.
+            # The check 'if WebReader is None:' is removed.
+            logger.info(f"Using {getattr(WebReader, '__name__', 'SimpleWebPageReader')} to load URL: {source_url}")
+            loader = WebReader() # This will fail if WebReader is not imported
             loaded_docs = loader.load_data(urls=[source_url])
             if not loaded_docs:
                 logger.warning(f"No documents loaded from URL '{source_url}'.")
@@ -567,26 +554,37 @@ def _initialize_vector_store(
     logger.info(f"Determined embedding dimension: {embedding_dim} for model {config.final_openai_model_embedding}")
 
     try:
-        # Attempt to get the collection. If it fails, it might mean the collection doesn't exist
-        # or there's a connection issue. The Qdrant client library might raise different exceptions.
-        # qdrant_client.http.exceptions.UnexpectedResponse: Response HTTP Status Code: 404
-        # is common for "not found". Other errors for connection issues.
         logger.debug(f"Checking for existing Qdrant collection: {config.effective_collection_name}")
-        q_client.get_collection(collection_name=config.effective_collection_name)
-        logger.info(f"Using existing Qdrant collection: {config.effective_collection_name}")
+        try:
+            q_client.get_collection(collection_name=config.effective_collection_name)
+            logger.info(f"Using existing Qdrant collection: {config.effective_collection_name}")
+        except Exception as e_get_coll:
+            # Catching a generic exception here because the specific Qdrant exception for "not found"
+            # can vary or be wrapped. We'll log it and attempt to create the collection.
+            logger.warning(f"Qdrant collection '{config.effective_collection_name}' not found or error accessing: {e_get_coll}. Attempting to create it.")
+            try:
+                q_client.create_collection(
+                    collection_name=config.effective_collection_name,
+                    vectors_config=qdrant_models.VectorParams(size=embedding_dim, distance=qdrant_models.Distance.COSINE)
+                )
+                logger.info(f"Successfully created Qdrant collection: {config.effective_collection_name} with vector size {embedding_dim}")
+            except Exception as e_create_coll:
+                logger.error(f"Failed to create Qdrant collection '{config.effective_collection_name}': {e_create_coll}")
+                logger.error("Please ensure Qdrant server is running and accessible, and that the API key (if used) is correct.")
+                return None # Critical failure
+
         vector_store = QdrantVectorStore(client=q_client, collection_name=config.effective_collection_name)
-        logger.info("Successfully connected to Qdrant vector store")
-    except Exception as e_qdrant: 
-        logger.error(f"Qdrant connection/collection check failed for '{config.effective_collection_name}': {e_qdrant}. Using SimpleVectorStore instead.")
-        from llama_index.core.vector_stores import SimpleVectorStore # Keep import local if only for this fallback
-        vector_store = SimpleVectorStore() 
-        logger.info("Using SimpleVectorStore as fallback (in-memory)")
-    
-    return vector_store
+        logger.info("Successfully initialized QdrantVectorStore.")
+        return vector_store
+        
+    except Exception as e_qdrant_general:
+        logger.error(f"A general error occurred during Qdrant vector store initialization for '{config.effective_collection_name}': {e_qdrant_general}")
+        logger.error("This could be due to connection issues, invalid Qdrant URL, or permissions problems.")
+        return None # Critical failure
 
 def _build_and_persist_index_and_docstore(
     nodes: List[Document], # LlamaIndex uses Document for nodes too
-    vector_store, # Can be QdrantVectorStore or SimpleVectorStore
+    vector_store: QdrantVectorStore, # Type hint changed to reflect no fallback
     config: PipelineConfig,
     verbose_mode: bool
 ) -> bool:
@@ -595,10 +593,8 @@ def _build_and_persist_index_and_docstore(
 
     logger.info("Building VectorStoreIndex from processed nodes. This may take a while...")
     logger.info(f"Local docstore/index metadata will be persisted to: {config.local_docstore_persist_path}")
-    if isinstance(vector_store, QdrantVectorStore):
-        logger.info(f"Vectors will be stored in Qdrant collection: {config.effective_collection_name} at {config.final_qdrant_url}")
-    else:
-        logger.info("Vectors will be stored in the in-memory SimpleVectorStore.")
+    # isinstance check for QdrantVectorStore is removed as it's the only type expected now
+    logger.info(f"Vectors will be stored in Qdrant collection: {config.effective_collection_name} at {config.final_qdrant_url}")
 
     try:
         logger.debug(f"Attempting os.makedirs for: {str(config.local_docstore_persist_path)}")
