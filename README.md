@@ -19,6 +19,7 @@
 *   `/ask` Command:**
     *   Queries the RAG system using a Qdrant collection (typically configured via the `QDRANT_COLLECTION_NAME` environment variable).
     *   Utilizes LlamaIndex and OpenAI models (e.g., `gpt-4.1-mini` for generation, `text-embedding-3-large` for embeddings) to process queries and generate relevant answers.
+    *   Employs a hybrid retrieval mechanism by default (combining dense vector search with BM25 sparse search) for improved relevance, which has been verified to function as intended when `RETRIEVAL_USE_HYBRID` is enabled.
     *   Supports advanced retrieval options, such as disabling Maximal Marginal Relevance (MMR) with `--no-mmr` (MMR is enabled by default).
     *   Posts formatted answers back to the originating Mattermost channel.
 
@@ -70,13 +71,14 @@
     *   `OPENAI_MODEL_LLM`: (Optional) OpenAI model for language generation (defaults to `gpt-4.1-mini`).
     *   `OPENAI_MODEL_EMBEDDING`: (Optional) OpenAI model for text embeddings (defaults to `text-embedding-3-large`). Ensure `config.py`'s `get_embedding_dim` function supports your chosen model, or ingestion will fail.
     *   `DEFAULT_VECTOR_SIZE`: (Optional) Vector size for new Qdrant collections if created by the system (defaults to `3072`, matching `text-embedding-3-large`). This is determined by `get_embedding_dim` in `config.py` based on the embedding model.
-    *   `RETRIEVAL_SIMILARITY_TOP_K`: (Optional) Number of top similar documents to retrieve initially.
+    *   `RETRIEVAL_SIMILARITY_TOP_K`: (Optional) Number of top similar documents to retrieve from dense (vector) search. Defaults to 25.
     *   `RETRIEVAL_USE_HYBRID`: (Optional) Set to `True` or `False` to enable/disable hybrid search (default is `True`).
-    *   `RETRIEVAL_SPARSE_TOP_K`: (Optional) Number of top documents for sparse retrieval in hybrid search.
-    *   `RETRIEVAL_RERANK_TOP_N`: (Optional) Number of documents to rerank (0 disables reranking).
-    *   `RETRIEVAL_MMR_LAMBDA`: (Optional) Lambda value for MMR (default 0.5).
-    *   `RETRIEVAL_COMPRESS_CONTEXT`: (Optional) Set to `True` to enable context compression.
+    *   `RETRIEVAL_SPARSE_TOP_K`: (Optional) Number of top documents for sparse retrieval (BM25) in hybrid search. Defaults to 7.
+    *   `RETRIEVAL_RERANK_TOP_N`: (Optional) Number of documents to rerank using a cross-encoder after initial retrieval. Defaults to 20 (0 disables reranking).
+    *   `RETRIEVAL_MMR_LAMBDA`: (Optional) Lambda value for Maximal Marginal Relevance (MMR) re-ranking (default 0.7).
+    *   `RETRIEVAL_COMPRESS_CONTEXT`: (Optional) Set to `True` to enable context compression (requires Cohere API key for CohereRerank).
     *   `COHERE_API_KEY`: (Optional) Cohere API key, required if using CohereRerank for context compression.
+    *   *Note on Retrieval Parameters*: These `RETRIEVAL_*` values have been tuned for a general balance of performance and relevance. You may need to adjust them based on your specific dataset and query patterns.
 
 4.  **Interactive Environment Setup Script:**
     The [`configure_env.py`](configure_env.py:1) script is an interactive command-line tool designed to help users set up the necessary environment variables for the `MMRag` application by generating a `.env` file. It simplifies the configuration process, reducing errors by guiding users through prompts for all required settings.
@@ -154,7 +156,9 @@
 *   **Qdrant is Mandatory**: Both ingestion (`/inject`) and querying (`/ask`) operations strictly require a running and accessible Qdrant instance configured via `QDRANT_URL`. If Qdrant is unavailable or the specified collection cannot be accessed/created, operations will fail with logged errors.
 *   **Missing Python Packages for Features**:
     *   **URL Ingestion**: To use `/inject <URL>`, you must have `llama-index-readers-web` (which provides `SimpleWebPageReader`) and its dependencies (like `beautifulsoup4`) installed. If these are missing, attempting URL ingestion will result in a Python error (e.g., `ImportError` or `NameError`) and the request will fail. The `server.py` script's `check_url_dependencies()` function only prints warnings at startup for some related packages (`langchain-community`, etc.) but does not prevent runtime errors if `SimpleWebPageReader` itself is unavailable.
-    *   **Advanced Retrieval Components**: The querying script (`query_llamaindex.py`) may be configured to use components like `BM25Retriever`, `CohereRerank`, or `SentenceTransformerRerank`. If the Python packages for these components (e.g., `llama-index-retrievers-bm25`, `llama-index-postprocessor-cohere`, `llama-index-postprocessor-sbert-rerank`) are not installed, any attempt to use them will lead to an `ImportError`, causing the `/ask` request to fail.
+    *   **Advanced Retrieval Components**:
+        *   **BM25/Hybrid Search**: For hybrid search functionality using BM25 (enabled by default via `RETRIEVAL_USE_HYBRID=True`), the `llama-index-retrievers-bm25` package must be installed. You can typically install this via `pip install llama-index-retrievers-bm25` or as part of a broader optional group like `pip install llama-index[bm25]`. If this package is missing, `query_llamaindex.py` will fail with an `ImportError` when attempting to initialize `BM25Retriever`.
+        *   **Rerankers**: The querying script (`query_llamaindex.py`) may be configured to use components like `CohereRerank` or `SentenceTransformerRerank`. If the Python packages for these components (e.g., `llama-index-postprocessor-cohere`, `llama-index-postprocessor-sbert-rerank`) are not installed, any attempt to use them (e.g., by setting a non-zero `RETRIEVAL_RERANK_TOP_N` or enabling context compression with Cohere) will lead to an `ImportError`, causing the `/ask` request to fail.
 *   **Mattermost API Communication**: All asynchronous messages and updates to Mattermost (e.g., from `/ask` responses, `/inject` progress) are sent via the Mattermost REST API using the `MATTERMOST_TOKEN`. If these API calls fail (e.g., invalid token, network issues), errors will be logged on the server, and messages will not be delivered. There is no fallback to using `response_url` for these posts.
 *   **OpenAI Model Configuration**: Ensure that the embedding model specified (e.g., `OPENAI_MODEL_EMBEDDING`) is recognized by the `get_embedding_dim` function in `config.py`. If an unknown model is used, `ingest_llamaindex.py` will fail during vector store initialization due to a `ValueError`.
 

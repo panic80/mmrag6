@@ -29,9 +29,9 @@ SERVER_HOST = os.environ.get("HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("PORT", "5000"))
 
 # --- Retrieval Configuration (defaults from query_llamaindex.py) ---
-RETRIEVAL_SIMILARITY_TOP_K = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 30))
-RETRIEVAL_SPARSE_TOP_K = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 10))
-RETRIEVAL_RERANK_TOP_N = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 50)) # 0 to disable
+RETRIEVAL_SIMILARITY_TOP_K = int(os.environ.get("RETRIEVAL_SIMILARITY_TOP_K", 25))
+RETRIEVAL_SPARSE_TOP_K = int(os.environ.get("RETRIEVAL_SPARSE_TOP_K", 7))
+RETRIEVAL_RERANK_TOP_N = int(os.environ.get("RETRIEVAL_RERANK_TOP_N", 20)) # 0 to disable
 RETRIEVAL_RERANKER_MODEL = os.environ.get("RETRIEVAL_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RETRIEVAL_USE_HYBRID = os.environ.get("RETRIEVAL_USE_HYBRID", "True").lower() == "true"
 RETRIEVAL_USE_MMR = os.environ.get("RETRIEVAL_USE_MMR", "True").lower() == "true"

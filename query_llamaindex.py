@@ -56,7 +56,9 @@ class HybridRetriever(BaseRetriever):
         """Retrieve nodes given query."""
         # Get results from both retrievers
         dense_nodes = self._dense_retriever.retrieve(query_bundle)
+        if _VERBOSE_OUTPUT: click.echo(f"[debug][HybridRetriever] Dense retriever found {len(dense_nodes)} nodes.")
         sparse_nodes = self._sparse_retriever.retrieve(query_bundle)
+        if _VERBOSE_OUTPUT: click.echo(f"[debug][HybridRetriever] Sparse retriever found {len(sparse_nodes)} nodes.")
         
         # Combine results based on mode
         if self._mode == "AND":
@@ -106,7 +108,9 @@ class HybridRetriever(BaseRetriever):
         """Asynchronously retrieve nodes given query."""
         # Get results from both retrievers asynchronously
         dense_nodes = await self._dense_retriever.aretrieve(query_bundle)
+        if _VERBOSE_OUTPUT: click.echo(f"[debug][HybridRetriever] Dense retriever (async) found {len(dense_nodes)} nodes.")
         sparse_nodes = await self._sparse_retriever.aretrieve(query_bundle)
+        if _VERBOSE_OUTPUT: click.echo(f"[debug][HybridRetriever] Sparse retriever (async) found {len(sparse_nodes)} nodes.")
         
         # Combine results based on mode
         if self._mode == "AND":
@@ -555,50 +559,95 @@ async def main_async(
                 llama_filters = MetadataFilters(filters=filter_conditions)
                 click.echo(f"[info] Applying metadata filters: {filters_kv}")
 
-        # Create a retriever that directly uses the documents from the docstore
-        retriever: BaseRetriever
+        # Create a retriever that directly uses the documents from the docstore - REMOVED
+        # retriever: BaseRetriever - REMOVED
         
-        # Get documents from docstore
-        all_documents = []
-        if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs'):
-            all_documents = list(storage_context.docstore.docs.values())
-            click.echo(f"[info] Found {len(all_documents)} documents in docstore for retrieval")
+        # Get documents from docstore - REMOVED
+        # all_documents = [] - REMOVED
+        # if hasattr(storage_context, 'docstore') and hasattr(storage_context.docstore, 'docs'): - REMOVED
+        #     all_documents = list(storage_context.docstore.docs.values()) - REMOVED
+        #     click.echo(f"[info] Found {len(all_documents)} documents in docstore for retrieval") - REMOVED
         
-        if not all_documents and hasattr(index, '_all_nodes_dict'):
-            all_documents = list(index._all_nodes_dict.values())
-            click.echo(f"[info] Found {len(all_documents)} documents in index for retrieval")
+        # if not all_documents and hasattr(index, '_all_nodes_dict'): - REMOVED
+        #     all_documents = list(index._all_nodes_dict.values()) - REMOVED
+        #     click.echo(f"[info] Found {len(all_documents)} documents in index for retrieval") - REMOVED
         
-        if all_documents:
-            # Create a simple retriever that returns all documents
-            from llama_index.core.retrievers import ListIndexRetriever
+        # if all_documents: - REMOVED
+            # Create a simple retriever that returns all documents - REMOVED
+            # from llama_index.core.retrievers import ListIndexRetriever - REMOVED
             
-            # Create a simple list index with the documents
-            from llama_index.core import ListIndex
-            list_index = ListIndex(all_documents)
+            # Create a simple list index with the documents - REMOVED
+            # from llama_index.core import ListIndex - REMOVED
+            # list_index = ListIndex(all_documents) - REMOVED
             
-            retriever = ListIndexRetriever(
-                index=list_index,
-                similarity_top_k=similarity_top_k
-            )
-            click.echo("[info] Using ListIndexRetriever with documents from docstore")
-        else:
-            # Fallback to vector retriever
-            click.echo("[warning] No documents found in docstore or index. Using empty retriever.")
-            class EmptyRetriever(BaseRetriever):
-                def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    return []
+            # retriever = ListIndexRetriever( - REMOVED
+            #     index=list_index, - REMOVED
+            #     similarity_top_k=similarity_top_k - REMOVED
+            # ) - REMOVED
+            # click.echo("[info] Using ListIndexRetriever with documents from docstore") - REMOVED
+        # else: - REMOVED
+            # Fallback to vector retriever - REMOVED
+            # click.echo("[warning] No documents found in docstore or index. Using empty retriever.") - REMOVED
+            # class EmptyRetriever(BaseRetriever): - REMOVED
+            #     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: - REMOVED
+            #         return [] - REMOVED
                 
-                async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-                    return []
+            #     async def _aretrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]: - REMOVED
+            #         return [] - REMOVED
             
-            retriever = EmptyRetriever()
+            # retriever = EmptyRetriever() - REMOVED
+
+        # Instantiate VectorIndexRetriever
+        vector_retriever = VectorIndexRetriever(
+            index=index, # The VectorStoreIndex connected to Qdrant
+            similarity_top_k=similarity_top_k, # From CLI/config
+            filters=llama_filters # Already defined in the script
+        )
+        click.echo(f"[info] VectorIndexRetriever initialized with similarity_top_k={similarity_top_k}.")
+
+        # Implement Hybrid Search Logic
+        retriever: BaseRetriever
+        if use_hybrid_search:
+            click.echo("[info] Hybrid search is enabled. Initializing BM25Retriever.")
+            # Ensure docstore is loaded and has documents
+            if hasattr(storage_context, 'docstore') and storage_context.docstore.docs:
+                all_docstore_nodes = list(storage_context.docstore.docs.values())
+                if all_docstore_nodes:
+                    try:
+                        # BM25Retriever import is already at the top of the file
+                        # Using default tokenizer from LlamaIndex, consider making it configurable if needed
+                        bm25_retriever = BM25Retriever.from_defaults(
+                            nodes=all_docstore_nodes,
+                            similarity_top_k=sparse_top_k # From CLI/config
+                        )
+                        click.echo(f"[info] BM25Retriever initialized with {len(all_docstore_nodes)} nodes from docstore and sparse_top_k={sparse_top_k}.")
+                        
+                        # Instantiate the custom HybridRetriever
+                        retriever = HybridRetriever(
+                            dense_retriever=vector_retriever,
+                            sparse_retriever=bm25_retriever
+                        )
+                        click.echo("[info] Using HybridRetriever (dense + sparse).")
+                    except Exception as e_bm25:
+                        click.echo(f"[warning] Failed to initialize BM25Retriever: {e_bm25}. Falling back to dense-only search.", err=True)
+                        retriever = vector_retriever # Fallback to dense if BM25 fails
+                else:
+                    click.echo("[warning] Docstore is empty. Cannot initialize BM25Retriever. Using dense-only search.", err=True)
+                    retriever = vector_retriever
+            else:
+                click.echo("[warning] Docstore not available or empty. Cannot initialize BM25Retriever. Using dense-only search.", err=True)
+                retriever = vector_retriever
+        else:
+            click.echo("[info] Hybrid search is disabled. Using dense-only VectorIndexRetriever.")
+            retriever = vector_retriever
 
         # 5. Node Postprocessors
         node_postprocessors_list: List[BaseNodePostprocessor] = []
         if use_mmr:
-            mmr_postprocessor = MMRNodePostprocessor(embed_model=Settings.embed_model, top_n=similarity_top_k, lambda_mult=mmr_lambda)
+            mmr_top_k = similarity_top_k if not use_hybrid_search else max(similarity_top_k, sparse_top_k)
+            mmr_postprocessor = MMRNodePostprocessor(embed_model=Settings.embed_model, top_n=mmr_top_k, lambda_mult=mmr_lambda)
             node_postprocessors_list.append(mmr_postprocessor)
-            click.echo(f"[info] Added MMRNodePostprocessor (top_n={similarity_top_k}).")
+            click.echo(f"[info] Added MMRNodePostprocessor (top_n={mmr_top_k}).")
         try:
             reorder_postprocessor = LongContextReorder()
             node_postprocessors_list.append(reorder_postprocessor)
@@ -641,8 +690,17 @@ async def main_async(
         for q_bundle in queries_to_run: # This loop will now run only once
             if _VERBOSE_OUTPUT and q_bundle.query_str != full_query_text: # This condition will likely not be met
                 click.echo(f"[info] Retrieving for expanded query: {q_bundle.query_str}")
+
+            if not use_hybrid_search and _VERBOSE_OUTPUT: # Or if retriever is vector_retriever directly
+                # This log will be a bit ahead of the actual call, but gives context
+                click.echo(f"[debug] Performing dense-only retrieval with top_k={vector_retriever._similarity_top_k}.")
+            
             retrieved_nodes_for_query: List[NodeWithScore] = await retriever.aretrieve(q_bundle)
-            if _VERBOSE_OUTPUT:
+            
+            if not use_hybrid_search and _VERBOSE_OUTPUT: # Or if retriever is vector_retriever directly
+                 click.echo(f"[debug] Dense-only retrieval found {len(retrieved_nodes_for_query)} nodes.")
+
+            if _VERBOSE_OUTPUT: # This existing log will now act as a summary after retriever (hybrid or dense)
                 click.echo(f"[info] Retrieved {len(retrieved_nodes_for_query)} nodes for query '{q_bundle.query_str}' before postprocessing.")
             
             current_processed_nodes = retrieved_nodes_for_query
